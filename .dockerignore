@@ -1,0 +1,9 @@
+.git/
+.venv/
+node_modules/
+*.log
+*.md
+.env
+.DS_Store
+dist/
+coverage/
