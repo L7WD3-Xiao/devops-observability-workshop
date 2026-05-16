@@ -5,3 +5,11 @@ redis
 python-dotenv
 pydantic
 uvicorn
+prometheus-fastapi-instrumentator
+opentelemetry-distro
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-sqlalchemy
+opentelemetry-instrumentation-redis
+opentelemetry-exporter-otlp
+opentelemetry-sdk
+python-json-logger

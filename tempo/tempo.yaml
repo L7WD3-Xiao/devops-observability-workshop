@@ -1,0 +1,46 @@
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: "0.0.0.0:4318"
+
+ingester:
+  trace_idle_period: 10s
+  max_block_bytes: 1_000_000
+  max_block_duration: 5m
+  lifecycler:
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    block_retention: 1h
+
+memberlist:
+  bind_port: 7946
+  join_members: []
+
+querier:
+  frontend_worker:
+    frontend_address: 127.0.0.1:9095
+
+query_frontend:
+  # concurrent_requests: 4              # 建议值为 CPU 核心数
+  search:
+    # 如果需要添加其他支持的参数，在这里配置
+    concurrent_jobs: 1000
+    target_bytes_per_job: 104857600
