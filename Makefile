@@ -10,13 +10,27 @@ up-all:
 
 down:
 	docker compose --profile observability down
-	docker compose down
+
+down-app:
+	docker compose stop app
 
 down-obs:
-	docker compose stop prometheus tempo loki grafana
+	docker compose stop prometheus alloy loki grafana jaeger
 
 restart-obs:
-	docker compose --profile observability restart prometheus tempo loki grafana
+	docker compose --profile observability restart prometheus alloy loki grafana jaeger
+
+status:
+	docker compose ps -a
+
+build:
+	docker compose build
+
+test-0:
+	curl -X POST "http://localhost:8000/shorten?original_url=https://www.baidu.com"
+
+test:
+	sh test.sh
 
 logs-app:
 	docker compose logs -f app
@@ -27,11 +41,8 @@ logs-l:
 logs-t:
 	docker compose logs -f tempo
 
-status:
-	docker compose ps
+logs-a:
+	docker compose logs -f alloy
 
-build:
-	docker compose build
-
-test:
-	curl -X POST "http://localhost:8000/shorten?original_url=https://www.baidu.com"
+logs-j:
+	docker compose logs -f jaeger

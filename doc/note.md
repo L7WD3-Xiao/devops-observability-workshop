@@ -173,25 +173,50 @@ shortener-observability/
 从应用到监控面板的数据流图
 
 ```mermaid
-flowchart LR
-    A[App] --> B(OpenTelemetry)
-    B -->|指标| P(Prometheus)
-    P --> G[Grafana]
-    B -->|日志| Promtail --> L(Loki)
-    L --> G[Grafana]
-    B -->|链路| T(Tempo)
-    T --> G[Grafana]
+flowchart TD
+    subgraph App[FastAPI]
+        A[app]
+        O[OpenTelemetry SDK]
+        M[metrics]
+    end
+
+    subgraph Alloy[Grafana Alloy]
+        R[OTLP Receiver]
+        T[Trace 处理]
+        L[Log 处理]
+    end
+
+    subgraph Backend[后端存储]
+        P[Prometheus]
+        Jaeger[Jaeger]
+        Loki[Loki]
+    end
+
+    subgraph Frontend[可视化]
+        G[Grafana]
+    end
+
+	A -- 暴露指标 --> M
+    A -- 生成日志 + trace --> O
+    O -- OTLP gRPC/HTTP --> R
+    R -- traces --> T -- OTLP --> Jaeger
+    R -- logs --> L -- Loki API --> Loki
+    M -- HTTP scrape --> P
+
+    P -- 数据源 --> G
+    Jaeger -- 数据源 --> G
+    Loki -- 数据源 --> G
 ```
 
 ## 服务总览
 
-| 服务       | 地址                                            | 用途               |
-| :--------- | :---------------------------------------------- | :----------------- |
-| 短链API    | [http://localhost:8000](http://localhost:8000/) | 业务服务           |
-| Prometheus | [http://localhost:9090](http://localhost:9090/) | Metrics采集        |
-| Grafana    | [http://localhost:3000](http://localhost:3000/) | 可视化（匿名登录） |
-| Loki       | [http://localhost:3100](http://localhost:3100/) | 日志存储           |
-| Tempo      | [http://localhost:3200](http://localhost:3200/) | Trace存储          |
+| 服务       | 地址                                            | 用途                 |
+| :--------- | :---------------------------------------------- | :------------------- |
+| 短链API    | [http://localhost:8000](http://localhost:8000/) | 业务服务             |
+| Prometheus | [http://localhost:9090](http://localhost:9090/) | Metrics采集          |
+| Grafana    | [http://localhost:3000](http://localhost:3000/) | 可视化（匿名登录）   |
+| Loki       | [http://localhost:3100](http://localhost:3100/) | 日志存储             |
+| Jaeger UI  | http://localhost:16686                          | 链路可视化（火焰图） |
 
 ------
 

@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki-uid    # 固定 UID，方便 jaeger 引用
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"traceid":"([a-f0-9]+)"'   # 匹配 JSON 日志中的 traceid 值
+          url: '$${__value.raw}'
+          datasourceUid: jaeger-uid
+          internalLink: true
+    version: 1
+    editable: false

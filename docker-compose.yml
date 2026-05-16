@@ -12,11 +12,13 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://root:123456@db:3306/shortener
       REDIS_URL: redis://redis:6379/0
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4318
-      OTEL_SERVICE_NAME: shortener-app
-      OTEL_TRACES_EXPORTER: otlp
-      OTEL_METRICS_EXPORTER: none  # 暂时禁用 metrics export
-      OTEL_LOGS_EXPORTER: none
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://alloy:4317
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4317
+      # OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      # OTEL_SERVICE_NAME: shortener-app
+      # OTEL_TRACES_EXPORTER: otlp
+      # OTEL_METRICS_EXPORTER: none  # 暂时禁用 metrics export
     volumes:
       - ./app:/app
     deploy:
@@ -66,6 +68,24 @@ services:
       - app-network
   
 # 可观测性
+  alloy:
+    image: grafana/alloy:latest
+    container_name: observability-alloy
+    profiles: ["observability"]
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    # healthcheck:
+    #   test: ["CMD", "alloy", "health", "http://localhost:12345"]
+    #   interval: 5s
+    #   timeout: 3s
+    #   retries: 5
+    networks:
+      - observability
+
   prometheus:
     image: prom/prometheus:latest
     container_name: observability-prometheus
@@ -87,22 +107,19 @@ services:
     networks:
       - observability
 
-
-  tempo:
-    image: grafana/tempo:2.0.1
-    container_name: observability-tempo
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: observability-jaeger
     profiles: ["observability"]
-    command: [ "-config.file=/etc/tempo.yaml" ]
-    volumes:
-      - ./tempo/tempo.yaml:/etc/tempo.yaml
-      - tempo_data:/var/tempo
+    # command: ["--collector.otlp.enabled=true", "--collector.otlp.grpc.host-port=:4317", "--collector.otlp.http.host-port=:4318"]
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_GRPC_HOST_PORT=:4317
+      - COLLECTOR_OTLP_HTTP_HOST_PORT=:4318
     ports:
-      - "4318:4318"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-    restart: unless-stopped
+      - "16686:16686"   # Jaeger UI
+      - "5317:4317"
+      - "5318:4318"
     networks:
       - observability
 

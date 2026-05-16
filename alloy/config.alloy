@@ -1,0 +1,31 @@
+// 接收来自 app 的 OTLP 数据（traces + logs）
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    logs   = [otelcol.processor.batch.logs.input]
+  }
+}
+
+// logs 批处理
+otelcol.processor.batch "logs" {
+  output {
+    logs = [otelcol.exporter.loki.default.input]   // 注意：连接到 exporter.loki
+  }
+}
+
+// 导出 logs 到 Loki（将 OTLP logs 转换为 Loki 格式）
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+// 6. 实际写 Loki
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

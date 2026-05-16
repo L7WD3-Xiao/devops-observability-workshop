@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger-uid   # 固定 UID，供 Loki derived field 引用
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogs:
+        datasourceUid: loki-uid   # 反向关联：从 trace 跳到日志（可选）
+        tags: ['traceid', 'spanid']
+    version: 1
+    editable: false

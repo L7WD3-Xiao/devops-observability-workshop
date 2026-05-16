@@ -10,11 +10,15 @@ from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from pythonjsonlogger import jsonlogger
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 
 from database import SessionLocal, engine, Base
 import crud, utils, models
@@ -33,16 +37,7 @@ class TraceIdFilter(logging.Filter):
                     record.trace_id = 'no-trace'
             else:
                 record.trace_id = 'no-trace'
-        # except Exception:
-        #     record.trace_id = 'no-trace'
         return True
-
-# 配置日志（修复：提供默认值）
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format='%(asctime)s | %(levelname)s | trace_id=%(trace_id)s | %(message)s',
-#     handlers=[logging.StreamHandler()]
-# )
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -76,16 +71,22 @@ logging.getLogger("uvicorn.access").addFilter(TraceIdFilter())
 try:
     resource = Resource(attributes={SERVICE_NAME: "shortener-service"})
     provider = TracerProvider(resource=resource)
-    
-    # 尝试连接到 Tempo
-    tempo_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://tempo:4318")
-    logger.info(f"Attempting to connect to Tempo at {tempo_endpoint}")
-    
-    exporter = OTLPSpanExporter(endpoint=tempo_endpoint, timeout=5)
-    processor = BatchSpanProcessor(exporter)
-    provider.add_span_processor(processor)
+
+    exporter = OTLPSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
-    
+
+    # 创建 LoggerProvider
+    logger_provider = LoggerProvider(resource=resource)
+    # 添加 OTLP 导出器（指向 Alloy）
+    otlp_log_exporter = OTLPLogExporter()
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(otlp_log_exporter))
+    set_logger_provider(logger_provider)
+
+    # 创建 LoggingHandler 将标准 logging 日志桥接到 OpenTelemetry
+    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+    logging.getLogger().addHandler(handler)
+
     # 自动埋点
     FastAPIInstrumentor().instrument()
     SQLAlchemyInstrumentor().instrument(engine=engine)
@@ -100,6 +101,7 @@ except Exception as e:
 
 tracer = trace.get_tracer(__name__)
 
+# ========== 3. FastAPI 应用 ==========
 try:
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
