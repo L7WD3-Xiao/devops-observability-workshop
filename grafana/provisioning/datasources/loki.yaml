@@ -10,7 +10,7 @@ datasources:
       derivedFields:
         - name: TraceID
           matcherRegex: '"traceid":"([a-f0-9]+)"'   # 匹配 JSON 日志中的 traceid 值
-          url: '$${__value.raw}'
+          url: '$${__value.raw}'                    # 注意要表示 "S" 需要用 $$ 转义
           datasourceUid: jaeger-uid
           internalLink: true
     version: 1

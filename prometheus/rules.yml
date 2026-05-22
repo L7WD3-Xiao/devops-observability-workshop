@@ -1,0 +1,94 @@
+groups:
+  - name: slo
+    interval: 30s
+    rules:
+      #=============SLO目标================
+      - record: slo:target
+        expr: 0.9
+        labels:
+          service: "my-service"
+          tier: "production"
+      
+      - record: slo:time_window
+        expr: 30  # 滚动窗口天数
+
+      #=============指标计算================
+      # 跳转请求总数（只统计 /{code} 路径，不含 /shorten）
+      - record: shortener:redirect_total
+        expr: |
+          sum by (code) (
+            increase(http_requests_total{method="GET", handler="/{short_code}"}[1h])
+          )
+
+      # 成功的请求总数
+      - record: shortener:redirect_success_total
+        expr: |
+          sum by (code) (
+            increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[1h])
+          )
+
+      # 当前 SLI（实际成功率）
+      - record: shortener:sli_current
+        expr: shortener:redirect_success_total / shortener:redirect_total
+
+      - record: shortener:sli_week
+        expr: |
+          sum by (code) (
+            increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[7d])
+          ) /
+          sum by (code) (
+            increase(http_requests_total{method="GET", handler="/{short_code}"}[7d])
+          )
+
+      # 当前错误预算剩余百分比（基于过去1小时窗口，可调整）
+      # 公式 1 - {实际错误率 / (1 - SLO目标)}
+      - record: shortener:ErrorBudgetBurnRate
+        expr: |
+          (1 - shortener:sli_current)
+          /
+          (1 - max(slo:target))
+      
+      - record: shortener:error_budget_remaining_week
+        expr: |
+          1 - (
+            (1 - shortener:sli_week)
+            /
+            (1 - max(slo:target))
+          )
+      
+      
+
+      # 延迟相关（P99）
+      - record: shortener:redirect_p99_latency_seconds
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{method="GET", handler="/{short_code}"}[5m])) by (le))
+
+      - record: shortener:redirect_p90_latency_seconds
+        expr: histogram_quantile(0.90, sum(rate(http_request_duration_seconds_bucket{method="GET", handler="/{short_code}"}[5m])) by (le))
+      
+      #=============告警规则================
+      # 错误预算快速燃烧告警
+      - alert: ErrorBudgetBurnRateHigh
+        expr: shortener:ErrorBudgetBurnRate > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "错误预算消耗过快"
+          description: "过去1h错误预算消耗过快 当前剩余预算: {{ $value | humanizePercentage }}"
+
+      # 剩余预算过低告警（低于30%）
+      - alert: ErrorBudgetLow
+        expr: shortener:error_budget_remaining_1d < 0.3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "错误预算不足30%"
+          description: "当前剩余错误预算: {{ $value | humanizePercentage }}，建议暂停发布或进行降级"
+      
+      # 延迟超标（P99 > 100ms）
+      - alert: HighLatencySLO
+        expr: shortener:redirect_p99_latency_seconds > 0.2
+        for: 2m
+        annotations:
+          summary: "P99 延迟超过 100ms 当前值 {{ $value }}s"
