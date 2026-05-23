@@ -67,9 +67,10 @@ logger.addHandler(console_handler)
 # 同时配置 uvicorn 访问日志
 logging.getLogger("uvicorn.access").addFilter(TraceIdFilter())
 
-# ========== 2. 初始化 OpenTelemetry（增加错误处理）==========
+# ========== 2. 初始化 OpenTelemetry ==========
 try:
     resource = Resource(attributes={SERVICE_NAME: "shortener-service"})
+    # 创建 TracerProvider
     provider = TracerProvider(resource=resource)
 
     exporter = OTLPSpanExporter()

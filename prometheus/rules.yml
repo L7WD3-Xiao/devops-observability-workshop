@@ -16,14 +16,14 @@ groups:
       # 跳转请求总数（只统计 /{code} 路径，不含 /shorten）
       - record: shortener:redirect_total
         expr: |
-          sum by (code) (
+          sum(
             increase(http_requests_total{method="GET", handler="/{short_code}"}[1h])
           )
 
       # 成功的请求总数
       - record: shortener:redirect_success_total
         expr: |
-          sum by (code) (
+          sum(
             increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[1h])
           )
 
@@ -33,16 +33,17 @@ groups:
 
       - record: shortener:sli_week
         expr: |
-          sum by (code) (
+          sum(
             increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[7d])
           ) /
-          sum by (code) (
+          sum(
             increase(http_requests_total{method="GET", handler="/{short_code}"}[7d])
           )
 
-      # 当前错误预算剩余百分比（基于过去1小时窗口，可调整）
-      # 公式 1 - {实际错误率 / (1 - SLO目标)}
-      - record: shortener:ErrorBudgetBurnRate
+      # 错误预算燃烧率 / 错误预算剩余百分比
+      # 错误预算燃烧率: 实际错误率 / (1 - SLO目标)
+      # 错误预算剩余百分比: 1 - 错误预算燃烧率
+      - record: shortener:error_budget_burn_rate
         expr: |
           (1 - shortener:sli_current)
           /
@@ -68,7 +69,7 @@ groups:
       #=============告警规则================
       # 错误预算快速燃烧告警
       - alert: ErrorBudgetBurnRateHigh
-        expr: shortener:ErrorBudgetBurnRate > 10
+        expr: shortener:error_budget_burn_rate > 10
         for: 5m
         labels:
           severity: warning
@@ -86,9 +87,9 @@ groups:
           summary: "错误预算不足30%"
           description: "当前剩余错误预算: {{ $value | humanizePercentage }}，建议暂停发布或进行降级"
       
-      # 延迟超标（P99 > 100ms）
+      # 延迟超标（P99 > 200ms）
       - alert: HighLatencySLO
         expr: shortener:redirect_p99_latency_seconds > 0.2
         for: 2m
         annotations:
-          summary: "P99 延迟超过 100ms 当前值 {{ $value }}s"
+          summary: "P99 延迟超过 200ms 当前值 {{ $value }}s"

@@ -119,8 +119,6 @@ services:
       - COLLECTOR_OTLP_HTTP_HOST_PORT=:4318
     ports:
       - "16686:16686"   # Jaeger UI
-      - "5317:4317"
-      - "5318:4318"
     networks:
       - observability
 
