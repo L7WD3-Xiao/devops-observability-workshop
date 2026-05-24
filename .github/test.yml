@@ -1,0 +1,67 @@
+name: Test
+
+# 1. 开启手动触发
+on:
+  workflow_dispatch:
+
+jobs:
+  slo-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install k6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+      - name: Run load test
+        run: |
+          SHORT_CODE=$(curl -s -X POST "http://47.114.124.150:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          echo '
+          import http from "k6/http";
+          import { check } from "k6";
+          export let options = {
+            vus: 30,
+            duration: "30s",
+          };
+          export default function () {
+            let res = http.get(__ENV.URL);
+            check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
+          }' | k6 run -e URL="http://47.114.124.150:8000/$SHORT_CODE" -
+      - name: Check SLO error budget
+        run: |
+          # 查询主机上的 Prometheus （需要主机 Prometheus 端口可被 GitHub Actions 访问）
+          # ssh ${{ secrets.SSH_USER }}@47.114.124.150 '/opt/shortener/scripts/check_slo.sh' || exit 1
+
+          QUERY='(1 - sum(rate(shortener:redirect_success_total[5m])) / sum(rate(shortener:redirect_total[5m])))'
+          # 查询 Prometheus
+          response=$(curl -s "${{ secrets.PROMETHEUS_DEV }}/api/v1/query?query=${QUERY}")
+          if [ $? -ne 0 ]; then
+              echo "ERROR: Failed to query Prometheus at ${{ secrets.PROMETHEUS_DEV }}"
+              exit 1
+          fi
+
+          # 提取结果值
+          status=$(echo "$response" | jq -r '.status')
+          if [ "$status" != "success" ]; then
+              echo "ERROR: Prometheus query unsuccessful. Response: $response"
+              exit 1
+          fi
+
+          result=$(echo "$response" | jq -r '.data.result[0].value[1]')
+          if [ "$result" == "null" ] || [ -z "$result" ]; then
+              echo "WARNING: No data points for the query, assuming 0 burn rate"
+              result=0
+          fi
+
+          # 比较
+          error_rate=$(echo "$result" | bc -l)
+          if [ "$RESULT" != "null" ] && (( $(echo "$RESULT > 0.1" | bc -l) )); then
+            echo -e "${RED}FAIL: Request error rate is ${error_rate} (threshold ${THRESHOLD})${NC}"
+              exit 1
+          else
+            echo -e "${GREEN}OK: Request error rate is ${error_rate} (threshold ${THRESHOLD})${NC}"
+            exit 0
+          fi
