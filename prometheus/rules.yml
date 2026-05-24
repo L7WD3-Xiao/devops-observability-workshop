@@ -32,13 +32,7 @@ groups:
         expr: shortener:redirect_success_total / shortener:redirect_total
 
       - record: shortener:sli_week
-        expr: |
-          sum(
-            increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[7d])
-          ) /
-          sum(
-            increase(http_requests_total{method="GET", handler="/{short_code}"}[7d])
-          )
+        expr: sum(rate(shortener:redirect_success_total[7d])) / sum(rate(shortener:redirect_total[7d]))
 
       # 错误预算燃烧率 / 错误预算剩余百分比
       # 错误预算燃烧率: 实际错误率 / (1 - SLO目标)

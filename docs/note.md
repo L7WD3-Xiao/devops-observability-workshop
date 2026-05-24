@@ -631,17 +631,77 @@ AlertManager
 
 # 四、CI/CD
 
-项目结构
+## 项目结构
 
 ```text
 shortener/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml          ← 持续集成流程（如运行测试）
-│       ├── deploy.yml      ← 部署流程
-│       └── scheduled.yml   ← 定时任务
+│       ├── ci.yml          ← 持续集成流程
+│       └── deploy.yml      ← 部署流程
 ├── (其他内容)
 ├── .gitignore
 └── README.md
 ```
 
+## 整体流水线设计
+
+目标
+
+> **从 `git push` → 自动构建镜像 → 推送到镜像仓库 → 部署到测试环境 → 运行冒烟测试 + 性能测试 → 如果SLO通过，再部署到生产环境**
+
+标准流程
+
+```yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: docker.io   # 或阿里云ACR、GHCR
+  IMAGE_NAME: yourusername/shortener
+
+jobs:
+  # 1. 测试 & 构建
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - checkout
+      - 单元测试
+      - 构建Docker镜像
+      - 推送到镜像仓库
+
+  # 2. 部署到dev环境
+  deploy-dev:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - 在dev服务器上拉取新镜像并重启
+      - 运行冒烟测试（curl验证）
+
+  # 3. 性能测试 + SLO校验（关键）
+  performance-test:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - 使用k6或wrk对短链API施压
+      - 查询Prometheus计算错误率 
+      - 如果错误率 > 10%，则失败流水线
+
+  # 4. 部署到生产（需手动触发或自动）
+  deploy-prod:
+    needs: performance-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production   # GitHub环境，可加审批
+    steps:
+      - 部署到生产环境
+```
+
+## 本地模拟测试
+
+考虑到不是所有人都有暴露了公网IP的服务器，本节将使用 **act** 工具（GitHub Actions本地运行器）来体验CI逻辑。
