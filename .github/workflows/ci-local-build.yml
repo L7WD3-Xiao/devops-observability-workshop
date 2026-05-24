@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        working-directory: ./app
+        # working-directory: ./app
         run: pip install -r requirements.txt
       - name: Run unit tests (if any)
         run: |
@@ -66,7 +66,7 @@ jobs:
       - name: Smoke test
         run: |
           sleep 10
-          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}/shorten?original_url=https://www.google.com" | jq -r '.short_code')
+          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
           curl -f -L "http://${{ secrets.DEV_HOST }}/$SHORT_CODE" || exit 1
 
   # 3. 性能测试 + SLO 校验（与之前相同，依赖测试主机上的 Prometheus）
@@ -80,7 +80,7 @@ jobs:
           sudo apt-get install -y k6   # 更简单的方式，部分 runner 已预装
       - name: Run load test
         run: |
-          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
           k6 run -e URL="http://${{ secrets.DEV_HOST }}/$SHORT_CODE" - <(cat <<EOF
           import http from 'k6/http';
           import { check } from 'k6';

@@ -7,4 +7,5 @@ node_modules/
 .DS_Store
 dist/
 coverage/
+app/__pycache__/
 README.md
