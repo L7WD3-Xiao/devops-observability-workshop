@@ -77,28 +77,41 @@ jobs:
       - name: Install k6
         run: |
           sudo apt-get update
-          sudo apt-get install -y k6   # 更简单的方式，部分 runner 已预装
+          sudo apt-get install -y gnupg
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
       - name: Run load test
         run: |
-          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
-          k6 run -e URL="http://${{ secrets.DEV_HOST }}:8000/$SHORT_CODE" - <(cat <<EOF
-          import http from 'k6/http';
-          import { check } from 'k6';
+          SHORT_CODE=$(curl -s -X POST "http://47.114.124.150:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          echo '
+          import http from "k6/http";
+          import { check } from "k6";
           export let options = {
             vus: 30,
-            duration: '30s',
+            duration: "30s",
           };
           export default function () {
             let res = http.get(__ENV.URL);
-            check(res, { 'status is 3xx': (r) => r.status >= 300 && r.status < 400 });
-          }
-          EOF
-          )
+            check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
+          }' | k6 run -e URL="http://47.114.124.150:8000/$SHORT_CODE" -
       - name: Check SLO error budget
         run: |
           # 查询主机上的 Prometheus （需要主机 Prometheus 端口可被 GitHub Actions 访问）
-          # 这里简化：执行主机上的脚本 check_slo.sh
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.DEV_HOST }} '/opt/scripts/check_slo.sh' || exit 1
+          RESULT=$(curl -s "http://***/api/v1/query?query=shortener:error_budget_burn_rate" | jq -r '.data.result[0].value[1]')
+          if [ -z "$RESULT" ] || [ "$RESULT" = "null" ]; then
+            echo "错误预算燃烧率获取失败: $RESULT"
+            exit 1
+          fi
+          
+          # 使用 awk 进行数值比较，更安全
+          if awk "BEGIN {exit(!($RESULT > 10))}"; then
+            echo "错误预算燃烧率过高: $RESULT，流水线失败，阻止部署到生产"
+            exit 1
+          else
+            echo "SLO 正常，错误预算燃烧率: $RESULT"
+          fi
 
   # 4. 生产环境部署（仅逻辑描述，不实际执行，以下配置仅供参考）
   deploy-prod:
