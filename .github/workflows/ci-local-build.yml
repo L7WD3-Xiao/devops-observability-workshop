@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        working-directory: ./app
+        # working-directory: ./app
         run: pip install -r requirements.txt
       - name: Run unit tests (if any)
         run: |
