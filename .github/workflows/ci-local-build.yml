@@ -1,10 +1,10 @@
 name: Shortener CI/CD (Local Build)
 
-# on:
-#   push:
-#     branches: [ master, develop ]
-#   pull_request:
-#     branches: [ master ]
+on:
+  push:
+    branches: [ develop ]
+  # pull_request:
+  #   branches: [ master ]
 
 # 全局环境变量，后续步骤可以直接使用 ${{ env.XXX }}
 # 实际并不使用，而是使用的是配置在secrets中的变量
@@ -59,8 +59,7 @@ jobs:
             cd /opt/shortener
             make build
             
-            # 3. 用 docker-compose 重启服务（如果依赖 db/redis 等）
-            # 这里假设你已经在主机上准备好了 docker-compose.yml ，里面引用 shortener:latest
+            # 3. 用 docker-compose 重启服务，仅重启 app 不重启依赖
             docker compose up -d --no-deps app
 
       - name: Smoke test
@@ -99,7 +98,7 @@ jobs:
       - name: Check SLO error budget
         run: |
           # 查询主机上的 Prometheus （需要主机 Prometheus 端口可被 GitHub Actions 访问）
-          RESULT=$(curl -s "http://***/api/v1/query?query=shortener:error_budget_burn_rate" | jq -r '.data.result[0].value[1]')
+          RESULT=$(curl -s "http://${{ secrets.PROMETHEUS_DEV }}/api/v1/query?query=shortener:error_budget_burn_rate" | jq -r '.data.result[0].value[1]')
           if [ -z "$RESULT" ] || [ "$RESULT" = "null" ]; then
             echo "错误预算燃烧率获取失败: $RESULT"
             exit 1
@@ -112,27 +111,3 @@ jobs:
           else
             echo "SLO 正常，错误预算燃烧率: $RESULT"
           fi
-
-  # 4. 生产环境部署（仅逻辑描述，不实际执行，以下配置仅供参考）
-  deploy-prod:
-    needs: performance-slo-check
-    runs-on: ubuntu-latest
-    if: false   # 禁止自动执行，仅用于展示逻辑
-    # 只有在 main 分支上的 push 才执行（避免从 develop 分支部署生产）
-    # if: github.ref == 'refs/heads/main'
-    # 使用 GitHub 的 Environment 功能，可以配置部署审批（需要手动确认）
-    environment:
-      name: production
-      url: https://your-prod-domain.com   # 你的生产域名
-    steps:
-      - name: Deploy to production
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            cd /opt/shortener
-            docker compose pull app
-            docker compose up -d --no-deps app
-            docker image prune -f

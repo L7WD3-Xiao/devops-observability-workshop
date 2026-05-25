@@ -6,7 +6,7 @@
 
 技术栈：`python` `fastapi`  `mysql`  `redis`  `docker` 
 
-## 项目结构
+## 1.项目结构
 
 最小项目结构（仅业务）
 
@@ -27,7 +27,7 @@ shortener/
 
 ---
 
-## Dockerfile
+## 2.Dockerfile
 
 用于将业务代码构建为镜像
 
@@ -48,7 +48,7 @@ CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000
 
 注：python项目不用设置两阶段构建，但注意合并多个`RUN`
 
-## Docker-compose
+## 3.Docker-compose
 
 docker-compose.yml
 
@@ -99,7 +99,7 @@ services:
 
 注：本项目为方便开箱即用，将数据库也放入容器，生产环境中除大厂数据库高可用场景外，一般将其直接部署于宿主机。
 
-## 测试短链
+## 4.测试短链
 
 ```sh
 # 0. 构建镜像
@@ -146,7 +146,7 @@ shortener-app  | INFO:     172.25.0.1:38982 - "GET /2T4vUl HTTP/1.1" 307 Tempora
 
 技术栈：`Prometheus` `Grafana`  `Loki`  `OpenTelemetry`   `Tempo`
 
-## 项目结构
+## 1.项目结构
 
 最终项目结构
 
@@ -181,7 +181,7 @@ shortener-observability/
 
 ------
 
-## 数据流图
+## 2.数据流图
 
 从应用到监控面板的数据流图
 
@@ -220,7 +220,7 @@ flowchart TD
     Loki -- 数据源 --> G
 ```
 
-## 服务总览
+## 3.服务总览
 
 | 服务       | 地址                                            | 用途               |
 | :--------- | :---------------------------------------------- | :----------------- |
@@ -232,7 +232,7 @@ flowchart TD
 
 ------
 
-## Docker-compose
+## 4.Docker-compose
 
 docker-compose.yml
 
@@ -345,9 +345,9 @@ volumes:
   grafana_data:
 ```
 
-## 可观测性测试
+## 5.可观测性测试
 
-### 0.准备工作
+### 5.0.准备工作
 
 查看容器状态
 
@@ -366,19 +366,19 @@ Up 5 days
 
 进入Explore，查看可观测性三大支柱
 
-### 1.指标-Metrics
+### 5.1.指标-Metrics
 
 选择 Prometheus，查询 `http_requests_total{}`
 
 ![msedge_sQYOqGwDHE](.\imgs\msedge_sQYOqGwDHE.png)
 
-### 2.日志-Logs
+### 5.2.日志-Logs
 
 切换到 Loki，搜索 `{job="shortener-service"}`
 
 ![msedge_Uj9ZG8HIYR](.\imgs\msedge_Uj9ZG8HIYR.png)
 
-### 3.链路-Traces
+### 5.3.链路-Traces
 
 从日志中复制一个 `trace_id`，粘贴到 Tempo 数据源
 
@@ -386,9 +386,9 @@ Up 5 days
 
 # 三、SLO与告警
 
-## 预备知识
+## 1.预备知识
 
-### 1.名词解释
+### 1.1.名词解释
 
 #### SLI（服务质量指标）
 
@@ -406,7 +406,7 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 
 - 1% 的请求可以超过 100ms 或失败（每10000个请求允许100个“坏请求”）
 
-### 2.常见监控指标
+### 1.2.常见监控指标
 
 通常分为 **四个黄金指标（Google SRE 经典）** + 扩展指标：
 
@@ -421,7 +421,7 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 
 **一句话原则**：监控 **用户能感知到的事情**（慢、失败、不可用），而不是内部无意义的“黑盒指标”。
 
-### 3.统计时间尺度
+### 1.3.统计时间尺度
 
 | 用途                       | 粒度     | 窗口                     | 使用场景                       |
 | :------------------------- | :------- | :----------------------- | :----------------------------- |
@@ -437,7 +437,7 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 - 告警窗口：过去 5 分钟错误率 > 1% → 触发预警
 - SLO 窗口：过去 30 天内总请求 1 亿次，错误次数 8 万 → 错误率 = 0.08% → 对比 SLO(0.1%) → 剩余预算充足
 
-## 本项目监控大盘
+## 2.本项目监控大盘
 
 一图流：
 
@@ -577,7 +577,7 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 
 ---
 
-## 告警规则详解
+## 3.告警规则详解
 
 ### 1. `ErrorBudgetBurnRateHigh`
 
@@ -625,13 +625,15 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 
 ## 待完成
 
+引入eBPF改造
+
 高延迟短链Top N
 
 AlertManager
 
 # 四、CI/CD
 
-## 项目结构
+## 1.项目结构
 
 ```text
 shortener/
@@ -644,7 +646,39 @@ shortener/
 └── README.md
 ```
 
-## 整体流水线设计
+## 2.准备内容
+
+### 2.1.环境准备
+
+- github账号
+- 暴露公网IP的服务器，准备好Docker环境
+- 确保主机上已经运行了 Prometheus + Grafana 等可观测性服务（可以用之前配置的 `docker-compose.yml` 启动全套）
+- 设置安全组，开放端口，并限制来源IP（可选）
+
+| 端口 | 服务                | 备注                                                     |
+| :--- | :------------------ | :------------------------------------------------------- |
+| 22   | SSH (Linux远程登录) | 限制来源IP，22端口被暴力破解、弱口令扫描的**第一目标**。 |
+| 3000 | Grafana管理面板     | 限制来源IP，管理面板应用经常有历史漏洞，绝不能公网暴露。 |
+| 8000 | app短链端口         | 临时开放，供Github Action调用                            |
+| 9090 | Prometheus          | 临时开放，供Github Action调用                            |
+
+（进阶：可用**动态临时加白名单**的方式临时向Github Action出口IP开放端口，目前先不限制IP开放端口）
+
+### 2.2.配置 Secrets 环境变量
+
+**在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加**
+
+| Secret 名称       | 说明                                                         |
+| :---------------- | :----------------------------------------------------------- |
+| `DOCKER_USERNAME` | （可选）Docker Hub 用户名                                    |
+| `DOCKER_PASSWORD` | （可选）Docker Hub 密码或 Access Token                       |
+| `DEV_HOST`        | 开发服务器的 IP 或域名                                       |
+| `PROD_HOST`       | （可选）生产服务器的 IP 或域名                               |
+| `SSH_USER`        | 服务器的登录用户名（如 root 或 ubuntu）                      |
+| `SSH_PRIVATE_KEY` | SSH 私钥（用于免密登录）                                     |
+| `PROMETHEUS_DEV`  | 开发环境 Prometheus 的访问地址（例如 `http://dev-server:9090`） |
+
+## 3.整体流水线设计
 
 目标
 
@@ -689,8 +723,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - 使用k6或wrk对短链API施压
-      - 查询Prometheus计算错误率 
-      - 如果错误率 > 10%，则失败流水线
+      - 查询Prometheus计算错误燃烧率
+      - 如果错误燃烧率过高，则失败流水线
 
   # 4. 部署到生产（需手动触发或自动）
   deploy-prod:
@@ -702,6 +736,231 @@ jobs:
       - 部署到生产环境
 ```
 
-## 本地模拟测试
+## 4.简化版本
 
-考虑到不是所有人都有暴露了公网IP的服务器，本节将使用 **act** 工具（GitHub Actions本地运行器）来体验CI逻辑。
+此处对上面流水线进行简化，仅进行前三个Job，即构建镜像、部署到测试环境、SLO校验，不部署到生产环境。
+
+同时，简化向 Docker Hub 推送镜像到流程（考虑到国内网络），改成由测试环境直接拉取最新仓库，并在本地构建镜像（就像我们之前做的）。
+
+### 简化版流水线
+
+```yml
+name: CI/CD (Local Build)
+
+on:
+  push:
+    branches: [ develop ]
+
+# 全局环境变量，后续步骤可以直接使用 ${{ env.XXX }}
+# 实际并不使用，而是使用的是配置在secrets中的变量
+# env:
+#   DEV_HOST: your-dev-server.com
+#   SSH_USER: your-ssh-username
+
+jobs:
+  # 1. 代码检查 + 单元测试（可选）
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - checkout
+      - 单元测试
+
+  # 2. 部署到dev环境
+  deploy-dev:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - 在dev服务器上拉取最新仓库并构建镜像
+      - 重启app
+      - 运行冒烟测试（curl验证）
+
+  # 3. 性能测试 + SLO校验（关键）
+  performance-test:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - 使用k6或wrk对短链API施压
+      - 查询Prometheus计算错误率 
+      - 如果错误率 > 10%，则失败流水线
+
+# 4. 部署到生产（仅展示逻辑，单独拉个文件配置手动触发）
+name: Deploy
+
+# 开启手动触发
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-prod:
+```
+
+具体配置和执行代码可参考文件
+
+### Q&A
+
+#### 1.SLO校验中，发现查 Prometheus 很慢，超过2m且查不到数据
+
+检查安全组设置，是否开放了9090端口
+
+#### 2.SLO校验中，通过命令查 Prometheus 显示 400 Bad Request
+
+例如下面的命令
+
+```bash
+curl -s "${PROMETHEUS_URL}/api/v1/query?query=${QUERY}"
+返回：400 Bad Request
+```
+
+这个 400 错误通常是因为 **PromQL 查询语句中的特殊字符没有正确 URL 编码**。 `${QUERY}` 里包含 `>`、`/`、`(` 等符号，curl 默认不会自动编码。
+
+改用下面的查询命令
+
+```bash
+curl -s -G "${PROMETHEUS_URL}/api/v1/query" --data-urlencode "query=${QUERY}"
+```
+
+# 五、高可用 & 容灾
+
+阶段4的目标是：**通过代码层面的关键改动和设计思想，让短链服务具备基础的高可用和容灾能力**。
+
+核心思路不是搭建多机房或全自动故障转移，而是：
+1. **消除单点**（服务可水平扩展、依赖有冗余）
+2. **可观测性验证**（能发现故障、能自动或手动恢复）
+3. **优雅降级**（依赖挂掉时核心功能不崩溃）
+
+下面给出**关键设计 + 必要代码片段**。
+
+---
+
+## 一、消除单点（设计中体现）
+
+### 1.1 短链服务本身无状态
+- 服务无状态 = 可多实例 + 前置负载均衡
+- 关键代码：确保 `app` 不存本地 Session，所有状态都在 Redis/MySQL
+
+### 1.2 Redis 哨兵模式（模拟高可用）
+在 `docker-compose` 中增加一个哨兵拓扑（至少 1 主 2 从 + 3 哨兵）。  
+**关键代码片段**（仅示意哨兵配置）：
+
+```yaml
+# 仅展示额外服务，不完整
+redis-sentinel:
+  image: bitnami/redis-sentinel:latest
+  environment:
+    REDIS_MASTER_HOST: redis-master
+    REDIS_MASTER_PORT_NUMBER: 6379
+```
+
+**应用层连接哨兵**（使用 `redis-py` 的 `Sentinel` 支持）：
+```python
+from redis.sentinel import Sentinel
+
+sentinel = Sentinel([('redis-sentinel-1', 26379), ...], socket_timeout=0.1)
+redis_client = sentinel.master_for('mymaster', socket_timeout=0.1)
+```
+
+### 1.3 MySQL 主从 + 读写分离（可选）
+- 写走主库，读走从库（短链跳转是读操作）
+- 代码片段：使用 SQLAlchemy 的 `bind` 或两个 Session
+
+```python
+# 读库 Session
+SessionRead = sessionmaker(bind=read_engine)
+# 写库 Session
+SessionWrite = sessionmaker(bind=write_engine)
+```
+
+---
+
+## 二、健康检查与自动恢复（配合编排）
+
+### 2.1 为短链服务添加 `/health` 和 `/ready` 接口
+```python
+@app.get("/health")
+def health():
+    # 检查依赖：Redis, DB
+    try:
+        redis_client.ping()
+        db.execute("SELECT 1")
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(503)
+```
+
+Docker Compose 或 K8s 中配置：
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  interval: 10s
+  retries: 3
+```
+
+---
+
+## 三、容灾模拟：依赖故障下的降级
+
+### 3.1 Redis 缓存完全不可用时的降级
+原来的 `redirect` 逻辑：Redis → DB → 写回 Redis。  
+当 Redis 连接失败时，直接绕过缓存，只查 DB。
+
+**关键代码片段（不完整）**：
+```python
+def get_redis_or_none():
+    try:
+        return Redis.from_url(REDIS_URL, socket_connect_timeout=1)
+    except:
+        return None
+
+redis_client = get_redis_or_none()
+if redis_client:
+    cached = redis_client.get(key)
+    ...
+else:
+    logger.warning("Redis unavailable, fallback to DB only")
+    # 直接查 DB
+```
+
+### 3.2 MySQL 不可用时，短链跳转会失败，但创建短链可以拒绝
+此时可以返回 503 并展示友好错误页面。
+
+---
+
+## 四、容灾演练与可观测性验证
+
+### 4.1 手动模拟 Redis 宕机
+```bash
+docker stop redis
+```
+观察：
+- Metrics：`redis_up` 指标变为 0
+- 日志：出现 `Redis unavailable` 降级日志
+- 请求仍然成功（只查 DB，延迟增加但可用）
+
+### 4.2 模拟服务实例下线
+```bash
+docker stop app
+```
+负载均衡应自动剔除该实例（如果有 Nginx 或 Docker Compose 的 `depends_on` 不是 LB，需要简单反向代理）。  
+**代码无关**，但面试要能说：“我可以配置 Nginx upstream 或使用 Docker swarm 的 routing mesh 实现自动剔除”。
+
+---
+
+## 五、面试中如何讲述阶段4
+
+> “我在设计上着重消除了单点：服务本身无状态，Redis 用哨兵模式，MySQL 可主从。并且实现了健康检查接口，配合编排可以实现自动重启。  
+> 最关键的是**降级**：当 Redis 不可用时，我会记录告警日志，但请求仍然能穿透到数据库，保证核心跳转功能不中断。  
+> 为了验证容灾，我手动停止 Redis 容器，观察到了降级流程和 Prometheus 告警，并且业务成功率没有下降（只是延迟略有升高）。  
+> 这种设计让我体会到：高可用不是依赖永远不坏，而是坏的时候系统还能以受损模式工作。”
+
+---
+
+## 六、需要你动手验证的关键点（无代码）
+
+- 把 Redis 停掉，发几个请求，确认依然能跳转
+- 查看日志是否输出了降级信息
+- 观察 Grafana 里 `redis_up` 指标变化
+- 同时启动两个 `app` 实例，用 `ab` 或 `curl` 轮流请求，证明无状态
+
+
+

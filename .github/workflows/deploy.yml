@@ -1,4 +1,4 @@
-name: Test
+name: Deploy
 
 # 开启手动触发
 on:
@@ -21,7 +21,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /opt/shortener
-            docker compose pull app
-            docker compose up -d --no-deps app
-            docker image prune -f
+            # cd /opt/shortener
+            # docker compose pull app
+            # docker compose up -d --no-deps app
+            # docker image prune -f
