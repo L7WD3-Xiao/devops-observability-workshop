@@ -144,7 +144,7 @@ shortener-app  | INFO:     172.25.0.1:38982 - "GET /2T4vUl HTTP/1.1" 307 Tempora
 
 # 二、可观测性
 
-技术栈：`Prometheus` `Grafana`  `Loki`  `OpenTelemetry`   `Tempo`
+技术栈：`Prometheus` `Grafana`  `Loki`  `OpenTelemetry`   `Alloy` `Jaeger`
 
 ## 1.项目结构
 
@@ -182,6 +182,8 @@ shortener-observability/
 ------
 
 ## 2.数据流图
+
+本项目采用埋点式的代码侵入方案。
 
 从应用到监控面板的数据流图
 
@@ -232,7 +234,9 @@ flowchart TD
 
 ------
 
-## 4.Docker-compose
+## 4.配置要点
+
+#### Docker-compose
 
 docker-compose.yml
 
@@ -345,6 +349,34 @@ volumes:
   grafana_data:
 ```
 
+### Grafana数据源
+
+配置`.\grafana\provisioning\datasources\datasources.yaml`
+
+```yaml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    version: 1
+    editable: false
+    
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    version: 1
+    editable: false
+```
+
 ## 5.可观测性测试
 
 ### 5.0.准备工作
@@ -380,9 +412,73 @@ Up 5 days
 
 ### 5.3.链路-Traces
 
-从日志中复制一个 `trace_id`，粘贴到 Tempo 数据源
+从日志中复制一个 `trace_id`，粘贴到 Jaeger 数据源
 
 ![msedge_eTrF2igVR3](.\imgs\msedge_eTrF2igVR3.png)
+
+## 6.关联跳转（Trace / Logs）
+
+在上面的测试中，我们是从日志中复制一个 `trace_id`，粘贴到 Jaeger 数据源。
+
+那么，既然日志中有 `trace_id`，能不能直接将`trace_id`做成**快速跳转链接**，点一下直接跳转到  Jaeger 数据源？
+
+如下方示例，TraceID 后有蓝色 Jaeger 图标
+
+![F0UmFUIdAQ](.\imgs\F0UmFUIdAQ.png)
+
+下面我们来配置
+
+重新配置`.\grafana\provisioning\datasources\datasources.yaml`，主要更改 Jaeger 和 Loki 部分
+
+```yaml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger-uid   # 固定 UID，供 Loki derived field 引用
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogs:
+        datasourceUid: loki-uid   # 反向关联：从 trace 跳到日志（可选）
+        tags: ['traceid', 'spanid']
+    version: 1
+    editable: false
+    
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki-uid    # 固定 UID，方便 jaeger 引用
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"traceid":"([a-f0-9]+)"'   # 匹配 JSON 日志中的 traceid 值
+          url: '$${__value.raw}'                    # 注意要表示 "S" 需要用 $$ 转义
+          datasourceUid: jaeger-uid
+          internalLink: true
+    version: 1
+    editable: false
+```
+
+重启服务，在Grafana看板中，也可以看到对应的配置
+
+进入Grafana -> Configuration -> Data sources -> Loki -> Derived fields
+
+![msedge_x4eRCkEUwl](.\imgs\msedge_x4eRCkEUwl.png)
+
+不过由于本项目的 Grafana 采用预配置数据源的形式，Grafana 中的更改并不会保存（指没给你保存按键），此处仅作演示。
+
+
 
 # 三、SLO与告警
 
@@ -623,9 +719,134 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 
 ---
 
-## 待完成
+## 4.监控大盘布局
 
-引入eBPF改造
+### 看板总览（建议仪表盘命名：`Shortener - SLO Dashboard`）
+
+| 序号 | 面板名称                     | 类型                  | 核心作用                         |
+| ---- | ---------------------------- | --------------------- | -------------------------------- |
+| 1    | **整体健康度**               | Stat / Gauge          | 一眼前端看到当前成功率 & P99延迟 |
+| 2    | **成功率 SLO 错误预算**      | Gauge + Time series   | 展示剩余预算，决策变更           |
+| 3    | **P99 / P90 / P50 延迟趋势** | Time series           | 发现延迟恶化趋势                 |
+| 4    | **延迟热力图**               | Heatmap               | 直观展示延迟分布变化             |
+| 5    | **请求量 & 错误率**          | Time series (stacked) | 识别流量突增与错误比例           |
+| 6    | **按短链维度的 Top N 延迟**  | Table                 | 定位慢短链（业务级可观测性）     |
+|      |                              |                       |                                  |
+
+---
+
+### 面板 1：整体健康度（Stat / Gauge）
+
+**作用**：展示当前（最近5分钟）的成功率和 P99 延迟，是否符合 SLO。
+
+#### 成功率（当前 SLI）
+```promql
+sum(rate(fastapi_requests_total{method="GET", path=~"/[a-zA-Z0-9]+", status_code=~"2..|3.."}[5m]))
+/
+sum(rate(fastapi_requests_total{method="GET", path=~"/[a-zA-Z0-9]+"}[5m]))
+```
+- 单位：百分比（0–1 → 乘以 100）
+- 阈值：绿色 >0.99，黄色 0.95~0.99，红色 <0.95
+
+#### P99 延迟（当前值）
+```promql
+histogram_quantile(0.99, sum(rate(fastapi_request_duration_seconds_bucket{method="GET", path=~"/[a-zA-Z0-9]+"}[5m])) by (le))
+```
+- 单位：秒（可显示为 ms）
+- 阈值：绿色 <0.1，黄色 0.1~0.2，红色 >0.2
+
+**面试亮点**：一眼判断系统是否在 SLO 内，适合做成大数字展示在仪表盘顶部。
+
+---
+
+### 面板 2：成功率 SLO 错误预算
+
+#### Time series 显示预算消耗速率
+```promql
+(1 - shortener:success_error_budget_remaining)   # 已消耗比例
+```
+叠加一条目标线（如 1 – 0.99 = 0.01 的预算总额线），观察是否快速上升。
+
+**面试亮点**：可以演示“当错误预算快速消耗时，我会暂停发布”。
+
+---
+
+### 面板 3：延迟百分位趋势（Time series）
+
+同时显示 P50、P90、P99，观察延迟变化。
+
+```promql
+# P99
+histogram_quantile(0.99, sum(rate(fastapi_request_duration_seconds_bucket{method="GET", path=~"/[a-zA-Z0-9]+"}[1m])) by (le))
+
+# P90
+histogram_quantile(0.90, sum(rate(fastapi_request_duration_seconds_bucket{method="GET", path=~"/[a-zA-Z0-9]+"}[1m])) by (le))
+
+# P50
+histogram_quantile(0.50, sum(rate(fastapi_request_duration_seconds_bucket{method="GET", path=~"/[a-zA-Z0-9]+"}[1m])) by (le))
+```
+- 线图，时间范围可选 last 1 hour
+- Y 轴单位秒（建议显示 ms）
+
+**面试亮点**：说明“P99 突然升高但 P50 正常，说明存在长尾慢请求，可能是某条冷短链或外部依赖问题”。
+
+---
+
+### 面板 4：延迟热力图（Heatmap）
+
+更直观地展示延迟分布的变化（颜色越亮表示请求数越多）。
+
+```promql
+sum(rate(fastapi_request_duration_seconds_bucket{method="GET", path=~"/[a-zA-Z0-9]+"}[1m])) by (le)
+```
+- Grafana 热力图需要选择 **Heatmap** 可视化，并设置 Format 为 **Heatmap**。
+- 需要配置 Bucket bound 从 `le` 标签中提取。
+
+**替代方案**：如果觉得热力图配置复杂，可以使用 **Histogram** 面板（柱状堆叠）。
+
+**面试亮点**：“热力图能一眼看出延迟分布的变化趋势，比如从集中在 20ms 变成分布在 100ms，说明系统性能劣化。”
+
+---
+
+### 面板 5：请求量与错误率（Stacked time series）
+
+#### 总请求 QPS
+```promql
+sum(rate(fastapi_requests_total{method="GET", path=~"/[a-zA-Z0-9]+"}[1m]))
+```
+
+#### 错误请求 QPS（4xx/5xx，不含 404 可酌情）
+```promql
+sum(rate(fastapi_requests_total{method="GET", path=~"/[a-zA-Z0-9]+", status_code=~"4..|5.."}[1m]))
+```
+
+使用 Stacked area 或两条线，便于观察错误率是否随流量增长而增长。
+
+**面试亮点**：“通过观察错误率和流量的相关性，可以判断是系统过载导致错误，还是外部攻击/爬虫导致。”
+
+---
+
+### 面板 6：按短链维度的 Top N 延迟（Table）
+
+这个面板**非常能体现业务可观测性**：你可以直接看到哪个短链跳转最慢。
+
+#### 前提：你需要自定义一个 Counter 或 Histogram 带上 `short_code` 标签。  
+如果当前没有，可以先用 `path` 代替（即短链 code）。但 `path` 本身就是 `/{code}`，所以可以直接按 `path` 分组。
+
+```promql
+# 每个短链的 P99 延迟（最近 5 分钟）
+histogram_quantile(0.99, sum(rate(fastapi_request_duration_seconds_bucket{method="GET"}[5m])) by (le, path))
+```
+- 在 Table 中显示 `path` 和 `value`，排序降序。
+- 只显示 Top 5 或 Top 10。
+
+**面试亮点**：“我可以快速定位到具体是哪个短链变慢了，然后去查它的原站是否响应慢，或者缓存策略是否失效。”
+
+---
+
+
+
+## 待完成
 
 高延迟短链Top N
 
