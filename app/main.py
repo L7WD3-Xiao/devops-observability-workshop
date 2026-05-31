@@ -1,11 +1,14 @@
 import os
 import logging
 import uuid
+import time
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from redis import Redis
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram
+from pythonjsonlogger import jsonlogger
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
@@ -14,7 +17,6 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from pythonjsonlogger import jsonlogger
 from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
@@ -23,7 +25,23 @@ from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from database import SessionLocal, engine, Base
 import crud, utils, models
 
-# ========== 1. 修复：更健壮的 trace_id filter ==========
+# ========== 自定义指标，注入short_code、cache_hit状态 ==========
+# 自定义：带 short_code 的计数器
+redirect_requests_total = Counter(
+    'shortener_redirect_requests_total',
+    'Total redirect requests by short_code and status',
+    ['short_code', 'status_code', 'cache_hit']
+)
+
+# 自定义：带 short_code 的延迟直方图
+redirect_duration = Histogram(
+    'shortener_redirect_duration_seconds',
+    'Redirect request duration by short_code',
+    ['short_code', 'cache_hit'],
+    buckets=(0.01, 0.05, 0.1, 0.5, 1)
+)
+
+# ========== trace_id filter ==========
 class TraceIdFilter(logging.Filter):
     def filter(self, record):
         # 确保 record 有 trace_id 属性
@@ -67,7 +85,7 @@ logger.addHandler(console_handler)
 # 同时配置 uvicorn 访问日志
 logging.getLogger("uvicorn.access").addFilter(TraceIdFilter())
 
-# ========== 2. 初始化 OpenTelemetry ==========
+# ========== 初始化 OpenTelemetry ==========
 try:
     resource = Resource(attributes={SERVICE_NAME: "shortener-service"})
     # 创建 TracerProvider
@@ -102,7 +120,7 @@ except Exception as e:
 
 tracer = trace.get_tracer(__name__)
 
-# ========== 3. FastAPI 应用 ==========
+# ========== FastAPI 应用 ==========
 try:
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
@@ -114,7 +132,7 @@ app = FastAPI(title="Shortener Service", version="1.0.0")
 # Prometheus 指标
 Instrumentator().instrument(app).expose(app)
 
-# ========== 4. 依赖注入 ==========
+# ========== 依赖注入 ==========
 def get_db():
     db = SessionLocal()
     try:
@@ -129,7 +147,7 @@ def get_redis():
     finally:
         redis_client.close()
 
-# ========== 5. API ==========
+# ========== API ==========
 @app.post("/shorten")
 def shorten(original_url: str, db: Session = Depends(get_db)):
     short_code = utils.generate_short_code()
@@ -140,7 +158,7 @@ def shorten(original_url: str, db: Session = Depends(get_db)):
 
 @app.get("/{short_code}")
 def redirect(short_code: str, request: Request, db: Session = Depends(get_db), redis_client: Redis = Depends(get_redis)):
-    # 生成一个请求 ID 用于追踪
+    start_time = time.time()
     request_id = str(uuid.uuid4())[:8]
     
     try:
@@ -154,11 +172,13 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
             cached_url = redis_client.get(cache_key)
             
             if cached_url:
+                cache_hit = "hit"
                 original_url = cached_url.decode()
                 logger.info(f"Cache hit", extra={"short_code": short_code, "request_id": request_id})
                 if span:
                     span.set_attribute("cache.hit", True)
             else:
+                cache_hit = "miss"
                 # 2. 查 DB
                 if span:
                     with tracer.start_as_current_span("db-query"):
@@ -184,8 +204,13 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
             # 4. 增加点击量
             crud.increment_click_count(db, short_code)
             
+            # 注入short_code cache_hit time
+            redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit=cache_hit).inc()
+            redirect_duration.labels(short_code=short_code, cache_hit=cache_hit).observe(time.time() - start_time)
+
             return RedirectResponse(url=original_url)
-    except HTTPException:
+    except HTTPException as e:
+        redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
         raise
     except Exception as e:
         logger.error(f"Error processing redirect: {e}", extra={"short_code": short_code, "request_id": request_id})
