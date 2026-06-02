@@ -8,9 +8,6 @@ groups:
         labels:
           service: "my-service"
           tier: "production"
-      
-      - record: slo:time_window
-        expr: 30  # 滚动窗口天数
 
       #=============指标计算================
       # 跳转请求总数（只统计 /{code} 路径，不含 /shorten）
@@ -31,8 +28,8 @@ groups:
       - record: shortener:sli_current
         expr: shortener:redirect_success_total / shortener:redirect_total
 
-      - record: shortener:sli_week
-        expr: sum(rate(shortener:redirect_success_total[7d])) / sum(rate(shortener:redirect_total[7d]))
+      - record: shortener:sli_month
+        expr: sum(rate(shortener:redirect_success_total[30d])) / sum(rate(shortener:redirect_total[30d]))
 
       # 错误预算燃烧率 / 错误预算剩余百分比
       # 错误预算燃烧率: 实际错误率 / (1 - SLO目标)
@@ -43,10 +40,10 @@ groups:
           /
           (1 - max(slo:target))
       
-      - record: shortener:error_budget_remaining_week
+      - record: shortener:error_budget_remaining
         expr: |
           1 - (
-            (1 - shortener:sli_week)
+            (1 - shortener:sli_month)
             /
             (1 - max(slo:target))
           )
@@ -73,7 +70,7 @@ groups:
 
       # 剩余预算过低告警（低于30%）
       - alert: ErrorBudgetLow
-        expr: shortener:error_budget_remaining_1d < 0.3
+        expr: shortener:error_budget_remaining < 0.3
         for: 5m
         labels:
           severity: critical

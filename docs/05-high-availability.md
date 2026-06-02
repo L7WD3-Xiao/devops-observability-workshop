@@ -2,7 +2,7 @@
 
 # 五、高可用 & 容灾
 
-阶段4的目标是：**通过代码层面的关键改动和设计思想，让短链服务具备基础的高可用和容灾能力**。
+阶段5的目标是：**通过代码层面的关键改动和设计思想，让短链服务具备基础的高可用和容灾能力**。
 
 核心思路不是搭建多机房或全自动故障转移，而是：
 
@@ -137,7 +137,7 @@ docker stop redis
 docker stop app
 ```
 
-负载均衡应自动剔除该实例（如果有 Nginx 或 Docker Compose 的 `depends_on` 不是 LB，需要简单反向代理）。  
+负载均衡应自动剔除该实例（如果有 Nginx 或 Docker Compose 的 `depends_on` 不是 LB，需要简单反向代理）。 
 **代码无关**，但面试要能说：“我可以配置 Nginx upstream 或使用 Docker swarm 的 routing mesh 实现自动剔除”。
 
 ---

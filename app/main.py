@@ -25,6 +25,8 @@ from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from database import SessionLocal, engine, Base
 import crud, utils, models
 
+SHORT_CODE_LENGTH = 6
+
 # ========== 自定义指标，注入short_code、cache_hit状态 ==========
 # 自定义：带 short_code 的计数器
 redirect_requests_total = Counter(
@@ -140,24 +142,31 @@ def get_db():
     finally:
         db.close()
 
-def get_redis():
-    redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+def get_redis_or_none():
     try:
-        yield redis_client
-    finally:
-        redis_client.close()
+        redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        try:
+            yield redis_client
+        finally:
+            redis_client.close()
+    except:
+        redis_client = None
 
 # ========== API ==========
 @app.post("/shorten")
 def shorten(original_url: str, db: Session = Depends(get_db)):
-    short_code = utils.generate_short_code()
+    short_code = utils.generate_short_code(SHORT_CODE_LENGTH)
     crud.create_url(db, short_code, original_url)
     
     logger.info(f"Short URL created", extra={"short_code": short_code, "original_url": original_url})
-    return {"short_code": short_code, "short_url": f"http://localhost:8000/{short_code}"}
+    return {"short_code": short_code}
 
 @app.get("/{short_code}")
-def redirect(short_code: str, request: Request, db: Session = Depends(get_db), redis_client: Redis = Depends(get_redis)):
+def redirect(short_code: str, request: Request, db: Session = Depends(get_db), redis_client: Redis = Depends(get_redis_or_none)):
+    # 拦截非目标请求（防扫描的）
+    if len(short_code) != SHORT_CODE_LENGTH:
+        raise HTTPException(status_code=404)
+
     start_time = time.time()
     request_id = str(uuid.uuid4())[:8]
     
@@ -169,8 +178,14 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
             
             # 1. 查缓存
             cache_key = f"short_url:{short_code}"
-            cached_url = redis_client.get(cache_key)
+            # 检查 redis 是否可用
+            if redis_client:
+                cached_url = redis_client.get(cache_key)
+            else:
+                logger.warning("Redis unavailable, fallback to DB only")
+                cached_url = None
             
+            # 若 缓存未命中 或 redis不可用 则 查DB
             if cached_url:
                 cache_hit = "hit"
                 original_url = cached_url.decode()
@@ -181,6 +196,7 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
                 cache_hit = "miss"
                 # 2. 查 DB
                 if span:
+                    span.set_attribute("cache.hit", False)
                     with tracer.start_as_current_span("db-query"):
                         url_map = crud.get_url_by_code(db, short_code)
                         if not url_map:
@@ -194,11 +210,9 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
                         raise HTTPException(status_code=404, detail="短链不存在")
                     original_url = url_map.original_url
                 
-                if span:
-                    span.set_attribute("cache.hit", False)
-                
                 # 3. 写缓存
-                redis_client.setex(cache_key, 300, original_url)
+                if redis_client:
+                    redis_client.setex(cache_key, 300, original_url)
                 logger.info(f"Cache miss, loaded from DB", extra={"short_code": short_code, "request_id": request_id})
             
             # 4. 增加点击量

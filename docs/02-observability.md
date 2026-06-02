@@ -33,8 +33,6 @@ shortener-observability/
     └── utils.py
 ```
 
-**请根据说明检查并调整对应的业务代码**
-
 ------
 
 ## 2.数据流图
@@ -90,9 +88,108 @@ flowchart TD
 
 ------
 
-## 4.配置要点
+## 4.配置详解
 
-#### Docker-compose
+本节将从**业务代码埋点、docker-compose配置、可观测性服务配置**三个角度详细说明该可观测性架构的构建
+
+*注：所有配置均可直接使用仓库中的示例配置，不关心如何埋点和具体配置可酌情跳过。*
+
+### 业务代码埋点
+
+目标：
+
+- **TraceID注入**：为 Logs 注入 TraceID 以实现后续的 Log2Trace 的一键关联跳转 [（见此处）](# 6.关联跳转)
+- **初始化OpenTelemetry**：通过 OpenTelemetry SDK 将 Logs 和 Traces 发往对应可观测性后端
+
+埋点前置准备：
+
+这一步将为 Logs 构造 TraceIDFilter 并实现结构化日志（JSON格式）
+
+```python
+class TraceIdFilter(logging.Filter):
+    def filter(self, record):
+        # 确保 record 有 trace_id 属性
+        if not hasattr(record, 'trace_id'):
+            span = trace.get_current_span()
+            if span:
+                ctx = span.get_span_context()
+                if ctx.is_valid:
+                    record.trace_id = format(ctx.trace_id, '032x')
+                else:
+                    record.trace_id = 'no-trace'
+            else:
+                record.trace_id = 'no-trace'
+        return True
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# 移除默认的 handler，避免重复
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# 创建 console handler
+console_handler = logging.StreamHandler()
+
+# 使用 JSON 格式（推荐，避免 KeyError）
+formatter = jsonlogger.JsonFormatter(
+    '%(asctime)s %(name)s %(levelname)s %(trace_id)s %(message)s',
+    rename_fields={
+        'asctime': 'timestamp',
+        'levelname': 'level',
+        'name': 'logger'
+    }
+)
+console_handler.setFormatter(formatter)
+
+# 添加 filter
+console_handler.addFilter(TraceIdFilter())
+logger.addHandler(console_handler)
+
+# 同时配置 uvicorn 访问日志
+logging.getLogger("uvicorn.access").addFilter(TraceIdFilter())
+```
+
+初始化OpenTelemetry
+
+```python
+# ========== 初始化 OpenTelemetry ==========
+try:
+    resource = Resource(attributes={SERVICE_NAME: "shortener-service"})
+    # 创建 TracerProvider
+    provider = TracerProvider(resource=resource)
+
+    exporter = OTLPSpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    # 创建 LoggerProvider
+    logger_provider = LoggerProvider(resource=resource)
+    # 添加 OTLP 导出器（指向 Alloy）
+    otlp_log_exporter = OTLPLogExporter()
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(otlp_log_exporter))
+    set_logger_provider(logger_provider)
+
+    # 创建 LoggingHandler 将标准 logging 日志桥接到 OpenTelemetry
+    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+    logging.getLogger().addHandler(handler)
+
+    # 自动埋点
+    FastAPIInstrumentor().instrument()
+    SQLAlchemyInstrumentor().instrument(engine=engine)
+    RedisInstrumentor().instrument()
+    
+    logger.info("OpenTelemetry initialized successfully")
+except Exception as e:
+    logger.warning(f"OpenTelemetry initialization failed: {e}. Continuing without tracing.")
+    # 创建空的 tracer provider
+    provider = TracerProvider()
+    trace.set_tracer_provider(provider)
+
+tracer = trace.get_tracer(__name__)
+```
+
+### Docker-compose
 
 docker-compose.yml
 
@@ -128,10 +225,6 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=15d'
-    deploy:
-      resources:
-        limits:
-          memory: 256M
     restart: unless-stopped
     networks:
       - observability
@@ -140,7 +233,6 @@ services:
     image: jaegertracing/all-in-one:1.57
     container_name: observability-jaeger
     profiles: ["observability"]
-    # command: ["--collector.otlp.enabled=true", "--collector.otlp.grpc.host-port=:4317", "--collector.otlp.http.host-port=:4318"]
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - COLLECTOR_OTLP_GRPC_HOST_PORT=:4317
@@ -160,10 +252,6 @@ services:
     command: -config.file=/etc/loki/local-config.yaml
     ports:
       - "3100:3100"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
     restart: unless-stopped
     networks:
       - observability
@@ -180,10 +268,6 @@ services:
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
-    deploy:
-      resources:
-        limits:
-          memory: 128M
     restart: unless-stopped
     networks:
       - observability
@@ -272,13 +356,13 @@ Up 5 days
 
 ![msedge_eTrF2igVR3](D:/Study/Note/project/shortener/docs/imgs/msedge_eTrF2igVR3.png)
 
-## 6.关联跳转（Trace / Logs）
+## 6.关联跳转
 
 在上面的测试中，我们是从日志中复制一个 `trace_id`，粘贴到 Jaeger 数据源。
 
 那么，既然日志中有 `trace_id`，能不能直接将`trace_id`做成**快速跳转链接**，点一下直接跳转到  Jaeger 数据源？
 
-如下方示例，TraceID 后有蓝色 Jaeger 图标
+如下方示例，TraceID 后有蓝色 Jaeger 图标，点击即可跳转到 Jaeger 中对应 TraceID 的查询结果。
 
 ![F0UmFUIdAQ](D:/Study/Note/project/shortener/docs/imgs/F0UmFUIdAQ.png)
 
@@ -304,9 +388,6 @@ datasources:
     jsonData:
       nodeGraph:
         enabled: true
-      tracesToLogs:
-        datasourceUid: loki-uid   # 反向关联：从 trace 跳到日志（可选）
-        tags: ['traceid', 'spanid']
     version: 1
     editable: false
     
@@ -319,7 +400,7 @@ datasources:
       derivedFields:
         - name: TraceID
           matcherRegex: '"traceid":"([a-f0-9]+)"'   # 匹配 JSON 日志中的 traceid 值
-          url: '$${__value.raw}'                    # 注意要表示 "S" 需要用 $$ 转义
+          url: '$${__value.raw}'                    # 注意要表示 "$" 需要用 $$ 转义
           datasourceUid: jaeger-uid
           internalLink: true
     version: 1
@@ -332,7 +413,7 @@ datasources:
 
 ![msedge_x4eRCkEUwl](D:/Study/Note/project/shortener/docs/imgs/msedge_x4eRCkEUwl.png)
 
-不过由于本项目的 Grafana 采用**预配置数据源**的形式，Grafana 中的更改并不会保存（指没给你保存按键），此处仅作演示。
+不过由于本项目的 Grafana 采用**预配置数据源**的形式，Grafana 中的更改并不会保存（没给你保存按键），此处仅作演示。
 
 
 

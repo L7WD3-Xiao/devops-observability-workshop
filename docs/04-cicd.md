@@ -13,21 +13,22 @@ shortener/
 └── README.md
 ```
 
-## 2.准备内容
+## 2.准备工作
 
 ### 2.1.环境准备
 
 - github账号
 - 暴露公网IP的服务器，准备好Docker环境
+- 为主机配置SSH连接
 - 确保主机上已经运行了 Prometheus + Grafana 等可观测性服务（可以用之前配置的 `docker-compose.yml` 启动全套）
 - 设置安全组，开放端口，并限制来源IP（可选）
 
-| 端口 | 服务                | 备注                                                     |
-| :--- | :------------------ | :------------------------------------------------------- |
-| 22   | SSH (Linux远程登录) | 限制来源IP，22端口被暴力破解、弱口令扫描的**第一目标**。 |
-| 3000 | Grafana管理面板     | 限制来源IP，管理面板应用经常有历史漏洞，绝不能公网暴露。 |
-| 8000 | app短链端口         | 临时开放，供Github Action调用                            |
-| 9090 | Prometheus          | 临时开放，供Github Action调用                            |
+| 端口 | 服务                | 备注                                                         |
+| :--- | :------------------ | :----------------------------------------------------------- |
+| 22   | SSH (Linux远程登录) | 限制来源IP（可选，因为可能会拦截Github Action出口IP），但确保仅允许密钥认证。 |
+| 3000 | Grafana管理面板     | 限制来源IP，管理面板应用经常有历史漏洞，绝不能公网暴露。     |
+| 8000 | app短链端口         | 业务端口，无来源限制。但会时不时有扫描器光顾，在本项目中非预期请求均返回404 |
+| 9090 | Prometheus          | 临时开放，供Github Action调用                                |
 
 （进阶：可用**动态临时加白名单**的方式临时向Github Action出口IP开放端口，目前先不限制IP开放端口）
 
@@ -165,11 +166,7 @@ jobs:
 
 ### Q&A
 
-#### 1.SLO校验中，发现查 Prometheus 很慢，超过2m且查不到数据
-
-检查安全组设置，是否开放了9090端口
-
-#### 2.SLO校验中，通过命令查 Prometheus 显示 400 Bad Request
+#### 1.SLO校验中，通过命令查 Prometheus 显示 400 Bad Request
 
 例如下面的命令
 
@@ -186,3 +183,51 @@ curl -s "${PROMETHEUS_URL}/api/v1/query?query=${QUERY}"
 curl -s -G "${PROMETHEUS_URL}/api/v1/query" --data-urlencode "query=${QUERY}"
 ```
 
+#### 2.（弃用）SLO校验中，发现查 Prometheus 很慢，超过2m且查不到数据
+
+检查安全组设置，是否开放了9090端口
+
+**备注：**现版本的配置没这个问题，校验逻辑从 Action主机直接调用 9090 端口查数据 变为**CI通过SSH到测试主机 → 在测试主机本地查询Prometheus → 把结果echo回CI**。
+
+这样做的好处：
+
+- ✅ Prometheus 完全不暴露公网
+- ✅ 利用现有的SSH通道（你已经在用ssh部署）
+- ✅ 符合**零信任网络**原则
+
+## 5.动态配置防火墙规则
+
+在使用 **GitHub Actions** 进行 CI/CD 部署时，如果目标服务器或防火墙需要配置 IP 白名单，就必须获取 GitHub 托管运行器的出口 IP 范围。GitHub 官方提供了 **Meta API** 来动态获取这些 IP。
+
+**关键点**
+
+- IP 范围采用 **CIDR** 表示法（如 *192.30.252.0/22*），可用在线工具转换为具体 IP 段。
+- 列表会随时间变化，需定期更新，避免因 IP 变更导致部署失败。
+- 这些 IP 涵盖 **内容分发、Webhook、GitHub Actions 构建** 等服务，但不保证包含 LFS、Packages 等全部服务。需开放的端口：**22（SSH）、80（HTTP）、443（HTTPS）**。
+
+（因轻量应用服务器API不支持对 CIDR 来源限制，下面给出使用 API 配置 ECS 安全组的示例，**仅供参考**）
+
+```yaml
+- name: Add temporary security group rule
+  run: |
+    ip=${{ steps.ip.outputs.ipv4 }}
+    aliyun ecs AuthorizeSecurityGroup \
+      --RegionId cn-hangzhou \
+      --SecurityGroupId sg-xxxxxx \
+      --IpProtocol tcp \
+      --PortRange 8080/8080 \
+      --SourceCidrIp ${ip}/32
+
+- name: Your deployment or test steps
+  run: echo "Running tasks..."
+
+- name: Revoke temporary rule
+  run: |
+  	ip=${{ steps.ip.outputs.ipv4 }}
+    aliyun ecs RevokeSecurityGroup \
+      --RegionId cn-hangzhou \
+      --SecurityGroupId sg-xxxxxx \
+      --IpProtocol tcp \
+      --PortRange 8080/8080 \
+      --SourceCidrIp ${ip}/32
+```

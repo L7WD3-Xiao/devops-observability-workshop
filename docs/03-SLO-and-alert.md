@@ -353,13 +353,11 @@ sum(rate(http_requests_total{method="GET", handler="/{short_code}", status_code=
 
 这个面板**非常能体现业务可观测性**：你可以直接看到哪个短链跳转最慢。
 
-#### 前提：你需要自定义一个 Counter 或 Histogram 带上 `short_code` 标签。  
-
-如果当前没有，可以先用 `path` 代替（即短链 code）。但 `path` 本身就是 `/{code}`，所以可以直接按 `path` 分组。
+**前提：你需要自定义一个 Histogram 带上 `short_code` 标签。**[见下方详解](# 5.高延迟短链Top N详解)
 
 ```promql
-# 每个短链的 P99 延迟（最近 5 分钟）
-histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{method="GET"}[5m])) by (le, path))
+# 每个短链的 P99 延迟
+histogram_quantile(0.99, sum(rate(shortener_redirect_duration_seconds_bucket{}[1h])) by (le, short_code))
 ```
 
 - 在 Table 中显示 `path` 和 `value`，排序降序。
@@ -367,11 +365,196 @@ histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{method="G
 
 **面试亮点**：“我可以快速定位到具体是哪个短链变慢了，然后去查它的原站是否响应慢，或者缓存策略是否失效。”
 
+## 5.高延迟短链Top N详解
+
+**问题：**默认的指标`http_request_duration_seconds_bucket`里不携带 `short_code` 标签，因此无法按`short_code` 分组聚合来按每个`short_code` 分别统计延迟。
+
+**目标：**自定义携带`short_code`的指标
+
+### 自定义指标与埋点
+
+在app代码中，自定义以下指标（主要用到这个`shortener_redirect_duration_seconds`）
+
+```python
+from prometheus_client import Counter, Histogram
+
+# ========== 自定义指标，注入short_code、cache_hit状态 ==========
+# 自定义：带 short_code 的计数器
+redirect_requests_total = Counter(
+    'shortener_redirect_requests_total',
+    'Total redirect requests by short_code and status',
+    ['short_code', 'status_code', 'cache_hit']
+)
+
+# 自定义：带 short_code 的延迟直方图
+redirect_duration = Histogram(
+    'shortener_redirect_duration_seconds',
+    'Redirect request duration by short_code',
+    ['short_code', 'cache_hit'],
+    buckets=(0.01, 0.05, 0.1, 0.5, 1)
+)
+```
+
+在跳转接口中埋点，修改 `redirect` 函数：
+
+```python
+@app.get("/{short_code}")
+def redirect(short_code: str, request: Request, ...):
+    start_time = time.time()
+    try:
+        # ... 原有逻辑 ...
+        cache_hit = "hit" if cached_url else "miss"
+        redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit=cache_hit).inc()
+        redirect_duration.labels(short_code=short_code, cache_hit=cache_hit).observe(time.time() - start_time)
+        return RedirectResponse(url=original_url)
+    except HTTPException as e:
+        redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
+        raise
+```
+
+这样 Prometheus 就会得到类似这样的指标：
+
+```text
+shortener_redirect_requests_total{short_code="abc123", status="success", cache_hit="hit"} 
+shortener_redirect_requests_total{short_code="abc123", status="success", cache_hit="miss"} 
+```
+
+使用下方查询语句
+
+```text
+histogram_quantile(0.99, sum(rate(shortener_redirect_duration_seconds_bucket{}[1h])) by (le, short_code))
+```
+
+可以得到类似这样的结果：
+
+![msedge_ckmhZPSilv](D:\Study\Note\project\shortener\docs\imgs\msedge_ckmhZPSilv.png)
+
+### 配置面板
+
+#### 设置显示Instant查询结果
+
+在面板的查询界面，你可能会看到类似下面的结果：
+
+| Time | short_code | Value |
+| ---- | ---- | ---- |
+| 2026-05-31 22:16:06.000 | edylVX | 0.859 |
+| 2026-05-31 22:16:07.000 | edylVX | 0.859 |
+
+即Table中展示了同一 `short_code ` 的不同时间查询结果，而非像上方图中那样每个 `short_code ` 只显示一个结果。
+
+**解决方法：**在 Grafana 的 Table 面板编辑界面：
+
+1. 点击查询选项卡的 **“Options”**（或右上角的 **“Query options”**）
+2. 找到 **“Format”**，选择 **“Table”**
+3. 找到 **“Type”** 或 **“Query type”**，从 `Range` 改为 **`Instant`**
+   - 有些版本显示为 **“Instant”** 复选框，勾选它即可
+4. 保存并刷新
+
+这样 Grafana 只会向 Prometheus 请求**当前时刻**（查询结束时间）的值，而不是一个时间范围内的多个点，于是每个 `short_code` 只会返回一行。
+
+#### 设置一键跳转链接
+
+**目标：**在我们知道哪些为高延迟短链后，我们希望能看到对应的日志以排查问题，因此需要配置一键跳转链接（就像上一章配置的 Log2Trace那样）。
+
+在 Grafana 右侧的覆写配置（**Overrides**）中为 `short_code` 添加 **Data link**并配置 **Url**，如图所示：
+
+![kWCy4bGzW2](D:\Study\Note\project\shortener\docs\imgs\kWCy4bGzW2.png)
+
+![msedge_yDCg7LvVpP](D:\Study\Note\project\shortener\docs\imgs\msedge_yDCg7LvVpP.png)
+
+---
+
+### Url 详解
+
+```text
+/explore?left={"datasource":"Loki","queries":[{"refId":"A","expr":"{job=\"shortener-service\"} |= `\"short_code\":\"${__data.fields.short_code}\"`"}],"range":{"from":"now-1h","to":"now"}}
+```
+
+#### 整体结构
+
+```text
+/explore?left={ ... }
+```
+
+- `/explore`：Grafana 中的 Explore 视图，用于交互式查询日志/指标。
+- `left`：表示左侧面板（Grafana 支持左右对比查询）。
+
+#### 核心参数详解
+
+1. 数据源
+
+```json
+"datasource":"Loki"
+```
+
+- 指定使用 **Loki** 作为日志数据源。
+
+2. 查询数组
+
+```json
+"queries":[{
+  "refId":"A",
+  "expr":"{job=\"shortener-service\"} |= `\"short_code\":\"${__data.fields.short_code}\"`"
+}]
+```
+
+- **`refId: "A"`**：查询的唯一标识符。
+- **`expr`**：LogQL 查询表达式。
+  - `{job="shortener-service"}`：过滤出 `job` 标签为 `shortener-service` 的日志流。
+  - `|=`：LogQL 的过滤器，表示“包含”该字符串。
+  - `\"short_code\":\"${__data.fields.short_code}\"`：查找日志中包含 `"short_code":"某个值"` 的行。
+  - `${__data.fields.short_code}`：这是一个 **Grafana 变量**，会从当前上下文（仪表板变量）中动态获取值。
+
+3. 时间范围
+
+```json
+"range":{
+  "from":"now-1h",
+  "to":"now"
+}
+```
+
+- 查询最近 **1 小时** 的日志。
+
 ## 待完成
 
-Metrics注入short_code
+（AIGC）
 
-高延迟短链Top N
+### AlertManager
 
-AlertManager
+### 主机性能/redis/db监控
 
+（受限于服务器2g内存，请自行配置）
+
+### Redis缓存预热
+
+**问题**：某个热门短链因为缓存过期（或从未缓存）导致频繁穿透到 DB，拖慢 P99。
+
+**做法**：
+
+- 写一个**定时任务**（或后台脚本），每隔几分钟扫描延迟 Top 10 的短链。
+- 对于这些短链，提前调用业务接口触发缓存加载（例如模拟一次跳转，或直接写 Redis）。
+- 可以结合告警：例如当某个短链的 P99 超过阈值 2 分钟，自动调用预热接口。
+
+**落地建议**：
+
+- 写一个 Python 脚本，通过 Prometheus API 拉取延迟最高的 5 个短链，然后对这些短链发送 `GET` 请求。
+- 把这个脚本放到 cron job（或用 FastAPI 的 BackgroundTasks 定期执行）。
+
+**面试话术**：
+
+> “我发现热门短链的缓存穿透是延迟的主要来源，所以实现了一个自动预热脚本：每 5 分钟拉取 Prometheus 中延迟最高的短链，主动加载到 Redis。上线后这些短链的 P99 延迟从 300ms 降到了 20ms。”
+
+### 业务健康看板
+
+**问题**：短链服务不光是技术同学用，运营或产品也会关心哪些短链转化率低、体验差。
+
+**做法**：
+
+- 在面板上增加**点击量**和**平均延迟**的表格，按短链聚合。
+- 增加一个**健康分数**：例如 `成功率*0.6 + (1-延迟归一化)*0.4`，低分短链需要人工 review。
+- 将 Grafana 看板分享给非技术团队（或截图），作为改进依据。
+
+**面试话术**：
+
+> “我还做了一个业务健康看板，产品经理可以看到每个短链的点击量和 P99 延迟。有一次某个营销短链特别慢，导致用户流失，我们根据数据找到原因（下游 CDN 节点问题），和运营一起推动解决。”
