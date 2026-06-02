@@ -96,6 +96,7 @@ jobs:
             check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
           }' | k6 run -e URL="http://47.114.124.150:8000/$SHORT_CODE" -
       - name: Check SLO error budget
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEV_HOST }}
           username: ${{ secrets.SSH_USER }}
