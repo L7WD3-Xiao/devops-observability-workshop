@@ -103,5 +103,6 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           # 将整个项目代码同步到目标主机的 /opt/shortener 目录
           script: |
-            /opt/shortener/scripts/check_slo.sh
+            cd /opt/shortener/
+            make check
             

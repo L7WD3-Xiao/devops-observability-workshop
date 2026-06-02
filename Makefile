@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: up up-all down down-obs restart logs build test
+.PHONY: up up-all down down-obs restart logs build test check
 
 up:
 	docker compose up -d
@@ -26,6 +26,8 @@ status:
 build:
 	docker compose build
 
+
+
 test-0:
 	curl -X POST "http://localhost:8000/shorten?original_url=https://www.baidu.com"
 
@@ -37,6 +39,12 @@ test-e:
 
 test-sim:
 	sh scripts/traffic_sim.sh
+
+
+check:
+	sh scripts/check_slo.sh
+
+
 
 logs-app:
 	docker compose logs -f app
