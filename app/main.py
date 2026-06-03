@@ -7,8 +7,10 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from redis import Redis
 from prometheus_fastapi_instrumentator import Instrumentator
-from prometheus_client import Counter, Histogram
-from pythonjsonlogger import jsonlogger
+from prometheus_client import Counter, Histogram, Gauge
+from redis.exceptions import RedisError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
@@ -23,11 +25,12 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 
 from database import SessionLocal, engine, Base
+from utils import safe_span_setattr
 import crud, utils, models
 
 SHORT_CODE_LENGTH = 6
 
-# ========== 自定义指标，注入short_code、cache_hit状态 ==========
+# ========== 自定义指标 ==========
 # 自定义：带 short_code 的计数器
 redirect_requests_total = Counter(
     'shortener_redirect_requests_total',
@@ -43,49 +46,18 @@ redirect_duration = Histogram(
     buckets=(0.01, 0.05, 0.1, 0.5, 1)
 )
 
-# ========== trace_id filter ==========
-class TraceIdFilter(logging.Filter):
-    def filter(self, record):
-        # 确保 record 有 trace_id 属性
-        if not hasattr(record, 'trace_id'):
-            span = trace.get_current_span()
-            if span:
-                ctx = span.get_span_context()
-                if ctx.is_valid:
-                    record.trace_id = format(ctx.trace_id, '032x')
-                else:
-                    record.trace_id = 'no-trace'
-            else:
-                record.trace_id = 'no-trace'
-        return True
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# 移除默认的 handler，避免重复
-if logger.hasHandlers():
-    logger.handlers.clear()
-
-# 创建 console handler
-console_handler = logging.StreamHandler()
-
-# 使用 JSON 格式（推荐，避免 KeyError）
-formatter = jsonlogger.JsonFormatter(
-    '%(asctime)s %(name)s %(levelname)s %(trace_id)s %(message)s',
-    rename_fields={
-        'asctime': 'timestamp',
-        'levelname': 'level',
-        'name': 'logger'
-    }
+redis_degradation_total = Counter(
+    'shortener_redis_degradation_total',
+    'Total number of Redis degradation events',
+    ['reason']  # reason: connection_error, timeout, other
 )
-console_handler.setFormatter(formatter)
 
-# 添加 filter
-console_handler.addFilter(TraceIdFilter())
-logger.addHandler(console_handler)
+redis_circuit_breaker_state = Gauge(
+    'shortener_redis_circuit_breaker_state',
+    'Redis circuit breaker state (0=closed, 1=open)'
+)
 
-# 同时配置 uvicorn 访问日志
-logging.getLogger("uvicorn.access").addFilter(TraceIdFilter())
+logger = utils.json_logger_with_trace_id_filter()
 
 # ========== 初始化 OpenTelemetry ==========
 try:
@@ -142,15 +114,60 @@ def get_db():
     finally:
         db.close()
 
-def get_redis_or_none():
+circuit_breaker = utils.get_circuit_breaker(logger=logger)
+
+def get_redis_with_fallback():
+    """
+    带降级逻辑的 Redis 客户端获取函数
+    返回 (redis_client, degraded)
+    - redis_client: Redis 客户端或 None
+    - degraded: 是否已降级（True 表示 Redis 不可用，使用 DB 兜底）
+    """
+    redis_client = None
+    degraded = False
+    
+    # 检查熔断器是否允许访问
+    if not circuit_breaker.should_allow():
+        degraded = True
+        redis_degradation_total.labels(reason="circuit_breaker_open").inc()
+        logger.warning("Redis circuit breaker open, using degraded mode")
+        return None, True
+    
     try:
-        redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-        try:
-            yield redis_client
-        finally:
-            redis_client.close()
-    except:
-        redis_client = None
+        # 设置连接超时和读写超时（避免长时间阻塞）
+        redis_client = Redis.from_url(
+            os.getenv("REDIS_URL"),
+            socket_connect_timeout=1,   # 连接超时 1 秒
+            socket_timeout=2,            # 读写超时 2 秒
+            retry_on_timeout=False,      # 不自动重试，快速失败
+            health_check_interval=30
+        )
+        # 测试连接（Ping 操作也会计入超时）
+        redis_client.ping()
+        circuit_breaker.record_success()
+        redis_circuit_breaker_state.set(0)
+        return redis_client, False
+    except (RedisConnectionError, RedisTimeoutError) as e:
+        # 连接失败或超时 → 降级
+        degraded = True
+        circuit_breaker.record_failure()
+        redis_circuit_breaker_state.set(1 if circuit_breaker.is_open else 0)
+        redis_degradation_total.labels(reason="connection_or_timeout").inc()
+        logger.error(f"Redis connection/timeout error: {e}, entering degraded mode")
+        return None, True
+    except RedisError as e:
+        # 其他 Redis 错误
+        degraded = True
+        circuit_breaker.record_failure()
+        redis_degradation_total.labels(reason="other_redis_error").inc()
+        logger.error(f"Redis error: {e}, entering degraded mode")
+        return None, True
+    except Exception as e:
+        # 未知错误
+        degraded = True
+        redis_degradation_total.labels(reason="unexpected").inc()
+        logger.error(f"Unexpected error connecting to Redis: {e}, entering degraded mode")
+        return None, True
 
 # ========== API ==========
 @app.post("/shorten")
@@ -162,7 +179,7 @@ def shorten(original_url: str, db: Session = Depends(get_db)):
     return {"short_code": short_code}
 
 @app.get("/{short_code}")
-def redirect(short_code: str, request: Request, db: Session = Depends(get_db), redis_client: Redis = Depends(get_redis_or_none)):
+def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
     # 拦截非目标请求（防扫描的）
     if len(short_code) != SHORT_CODE_LENGTH:
         raise HTTPException(status_code=404)
@@ -172,51 +189,65 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db), r
     
     try:
         with tracer.start_as_current_span("redirect-flow") as span:
+            redis_client, redis_degraded = get_redis_with_fallback()
             if span:
                 span.set_attribute("http.short_code", short_code)
                 span.set_attribute("http.request_id", request_id)
+                span.set_attribute("redis.degraded", redis_degraded)
             
-            # 1. 查缓存
-            cache_key = f"short_url:{short_code}"
-            # 检查 redis 是否可用
-            if redis_client:
-                cached_url = redis_client.get(cache_key)
+            original_url = None
+            cache_hit = False
+             # 尝试从 Redis 读取（仅当 Redis 可用且未降级）
+            if redis_client is not None and not redis_degraded:
+                try:
+                    cache_key = f"short_url:{short_code}"
+                    cached_url = redis_client.get(cache_key)
+                    if cached_url:
+                        original_url = cached_url.decode()
+                        cache_hit = True
+                        logger.info(f"Cache hit", extra={"short_code": short_code})
+                        safe_span_setattr(span, "cache.hit", True)
+                    else:
+                        logger.info(f"Cache miss", extra={"short_code": short_code})
+                        safe_span_setattr(span, "cache.hit", False)
+                except RedisError as e:
+                    # 读取失败，记录但继续走 DB（不抛异常）
+                    logger.warning(f"Redis get failed: {e}, falling back to DB")
+                    redis_degradation_total.labels(reason="read_error").inc()
+                    redis_client = None  # 标记不可用，后续不走回写
             else:
-                logger.warning("Redis unavailable, fallback to DB only")
-                cached_url = None
+                # Redis 已降级，记录降级事件
+                logger.warning(f"Redis degraded mode active, bypassing cache", extra={"short_code": short_code})
+                safe_span_setattr(span, "cache.bypassed", True)
             
-            # 若 缓存未命中 或 redis不可用 则 查DB
-            if cached_url:
-                cache_hit = "hit"
-                original_url = cached_url.decode()
-                logger.info(f"Cache hit", extra={"short_code": short_code, "request_id": request_id})
-                if span:
-                    span.set_attribute("cache.hit", True)
-            else:
-                cache_hit = "miss"
-                # 2. 查 DB
-                if span:
-                    span.set_attribute("cache.hit", False)
-                    with tracer.start_as_current_span("db-query"):
-                        url_map = crud.get_url_by_code(db, short_code)
-                        if not url_map:
-                            logger.warning(f"Short code not found", extra={"short_code": short_code, "request_id": request_id})
-                            raise HTTPException(status_code=404, detail="短链不存在")
-                        original_url = url_map.original_url
-                else:
+            # 3. 缓存未命中或 Redis 降级 → 查询 DB
+            if original_url is None:
+                safe_span_setattr(span, "cache.hit", False)
+                with tracer.start_as_current_span("db-query"):
                     url_map = crud.get_url_by_code(db, short_code)
                     if not url_map:
                         logger.warning(f"Short code not found", extra={"short_code": short_code, "request_id": request_id})
                         raise HTTPException(status_code=404, detail="短链不存在")
                     original_url = url_map.original_url
                 
-                # 3. 写缓存
+                # 4. 写缓存
                 if redis_client:
-                    redis_client.setex(cache_key, 300, original_url)
-                logger.info(f"Cache miss, loaded from DB", extra={"short_code": short_code, "request_id": request_id})
+                    try:
+                        cache_key = f"short_url:{short_code}"
+                        redis_client.setex(cache_key, 300, original_url)
+                        logger.debug(f"Cache backfilled", extra={"short_code": short_code})
+                    except RedisError as e:
+                        # 回写失败不影响主流程
+                        logger.warning(f"Redis setex failed: {e}", extra={"short_code": short_code})
             
-            # 4. 增加点击量
+            # 5. 增加点击量
             crud.increment_click_count(db, short_code)
+
+            # 6. 如果处于降级模式，在响应头中标记（用于监控）
+            if redis_degraded:
+                response = RedirectResponse(url=original_url)
+                response.headers["X-Redis-Degraded"] = "true"
+                return response
             
             # 注入short_code cache_hit time
             redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit=cache_hit).inc()
