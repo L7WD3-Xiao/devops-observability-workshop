@@ -222,13 +222,13 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
             
             # 3. 缓存未命中或 Redis 降级 → 查询 DB
             if original_url is None:
-                safe_span_setattr(span, "cache.hit", False)
                 with tracer.start_as_current_span("db-query"):
                     url_map = crud.get_url_by_code(db, short_code)
                     if not url_map:
                         logger.warning(f"Short code not found", extra={"short_code": short_code, "request_id": request_id})
                         raise HTTPException(status_code=404, detail="短链不存在")
                     original_url = url_map.original_url
+                    logger.info(f"Loaded from DB", extra={"short_code": short_code})
                 
                 # 4. 写缓存
                 if redis_client:
