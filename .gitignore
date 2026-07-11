@@ -8,4 +8,3 @@ node_modules/
 dist/
 coverage/
 app/__pycache__/
-README.md
