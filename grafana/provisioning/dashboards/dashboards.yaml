@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: "Shortener SLO"
+    orgId: 1
+    folder: "Shortener"
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      # foldersFromFilesStructure: true
