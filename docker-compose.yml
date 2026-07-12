@@ -10,8 +10,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: mysql+pymysql://root:123456@db:3306/shortener
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://alloy:4317
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc

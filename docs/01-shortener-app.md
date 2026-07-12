@@ -63,8 +63,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: mysql+pymysql://root:123456@db:3306/shortener
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
     volumes:
       - ./app:/app
       
@@ -73,7 +73,7 @@ services:
     container_name: shortener-db
     command: --default-authentication-plugin=mysql_native_password
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: shortener
     ports:
       - "3306:3306"
