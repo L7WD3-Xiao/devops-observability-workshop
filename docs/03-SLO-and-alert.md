@@ -276,7 +276,7 @@ histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{method="G
 - 单位：秒（可显示为 ms）
 - 阈值：绿色 <0.1，黄色 0.1~0.2，红色 >0.2
 
-**面试亮点**：一眼判断系统是否在 SLO 内，适合做成大数字展示在仪表盘顶部。
+一眼判断系统是否在 SLO 内，适合做成大数字展示在仪表盘顶部。
 
 ---
 

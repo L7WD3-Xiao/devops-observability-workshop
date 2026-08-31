@@ -42,7 +42,7 @@
 3. **熔断器与优雅降级**
    - 自研轻量熔断器（`CircuitBreakerState`）：连续 3 次失败触发熔断 → 30 秒后半开探测 → 成功则关闭
    - Redis 降级时请求穿透到 MySQL，响应头注入 `X-Redis-Degraded: true` 供上游感知；降级事件上报 Prometheus（`shortener_redis_degradation_total`）
-   - 手动停 Redis 容器进行容灾演练：前几个请求超时后熔断器打开，后续请求稳定走 DB（延迟从 ~5ms 升至 ~30ms），重启 Redis 后 30 秒内自动恢复缓存
+   - 手动停 Redis 容器进行容灾演练：前几个请求超时后熔断器打开，后续请求稳定走 DB（延迟从 ~5ms 升至 ~30ms 稳态降级），重启 Redis 后 30 秒内自动恢复缓存
 
 4. **CI/CD 流水线**
    - 基于 GitHub Actions 实现三阶段流水线：代码检查 → SSH 部署到开发环境 → k6 压测（30 VUs / 30s）+ SLO 门禁
@@ -53,7 +53,7 @@
 
 - 实现 Metrics → Logs → Traces **三信号关联排查**：从 Grafana 发现 P99 异常 → 点击跳转到 Loki 日志 → 通过 trace_id 查看 Jaeger 火焰图，定位到缓存穿透，全链路耗时 < 2 分钟
 - CI/CD 流水线在 k6 压测后自动校验 SLO，错误预算燃烧率超标时阻断发布，**将发布质量决策从人工判断变为自动化门禁**
-- Redis 容灾演练验证了降级逻辑：熔断器在 3 次失败后打开，P99延迟增加至500ms但仍可用，恢复后自动闭合
+- Redis 容灾演练验证了降级逻辑：熔断器在 3 次失败后打开，演练瞬间 P99（含 3 个 1s 连接超时请求）约 500ms，稳态降级 P99 约 30–60ms，核心跳转始终可用；恢复后 30 秒内自动闭合
 - 整体方案覆盖 Google SRE Book 核心实践（SLO、错误预算、金丝雀/降级），具备校招面试中的差异化竞争力
 
 ---
@@ -199,15 +199,21 @@ CLOSED（正常）──[连续 3 次失败]──→ OPEN（熔断）──[30 
 
 演练步骤和观察：
 
-1. **正常状态**：`make test` 创建短链并跳转，Redis 缓存命中率 100%，P99 延迟约 5ms
+1. **正常状态**：`make test` 创建短链并跳转，Redis 缓存命中率 100%。模拟生产环境压测（30 VUs）下，**1G 数据库 / 100M Redis 持久卷**的 P99 约 5–15ms，**10G 数据库 / 300M Redis 持久卷**约 10–25ms。延迟主要来自每个请求必做的 MySQL 点击量 UPDATE+COMMIT（每次 commit 一次 fsync），Redis GET 本身 < 1ms
 2. **`docker compose stop redis`**：手动停掉 Redis 容器
 3. **前 3 个请求**：每个请求尝试连接 Redis，因 `socket_connect_timeout=1` 在 1 秒后超时，记录 `redis_degradation_total{reason="connection_or_timeout"}`，熔断器 `consecutive_failures` 累加
-4. **第 4 个请求起**：熔断器打开（`is_open = True`），`should_allow()` 返回 False，请求直接跳过 Redis 查 DB，不再尝试连接 Redis。延迟从 ~5ms 升至 ~30ms，但请求仍成功。响应头出现 `X-Redis-Degraded: true`
+4. **第 4 个请求起**：熔断器打开（`is_open = True`），`should_allow()` 返回 False，请求直接跳过 Redis 查 DB，不再尝试连接 Redis。稳态降级延迟：1G 场景 P99 约 15–40ms，10G 场景约 30–60ms（缓冲池冷时可达 100ms+），请求仍成功。响应头出现 `X-Redis-Degraded: true`
 5. **Prometheus 观察**：`shortener_redis_degradation_total` 递增，`shortener_redis_circuit_breaker_state` 变为 1
 6. **`docker compose start redis`**：重启 Redis
 7. **30 秒后**：熔断器进入半开状态，允许一个请求尝试连接 Redis。连接成功 → `record_success()` → 熔断器关闭，缓存恢复正常
 
 整个过程核心功能（短链跳转）没有中断，只是性能降级。
+
+**数字口径说明**：
+
+- **演练瞬间 P99 ≠ 稳态降级 P99**：演练窗口前 3 个请求各阻塞约 1s（`socket_connect_timeout=1` 连接超时），若 P99 统计窗口包含这 3 个请求，会看到约 500ms–1s 的尖刺；熔断打开后纯走 DB 的**稳态** P99 才是 step 4 的数字。面试时建议分开表述
+- **为什么 10G / 1G 数据库对 P99 影响不大**：`short_code` 是唯一索引点查，B+ 树深度都是 2–3 层，差别只在于缓冲池（MySQL 8 默认仅 128MB）是否命中冷页——10G 场景随机短码更可能读盘（SSD 5–20ms/次），所以 miss 路径 P99 从 ~20ms 抬到 ~50ms
+- **真正的 P99 地板在代码里**：每个请求（含缓存命中）都会执行 `increment_click_count`（SELECT+UPDATE+COMMIT，`innodb_flush_log_at_trx_commit=1` 下每次 commit 一次 fsync），加上 SQLAlchemy 默认连接池只有 5 个、app 容器限 0.5 CPU。想降低 P99，应优先改造这三处（异步/批量计数、加大连接池、放宽缓冲池），而不是纠结 Redis 卷大小
 
 ---
 
