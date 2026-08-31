@@ -10,18 +10,20 @@ groups:
           tier: "production"
 
       #=============指标计算================
-      # 跳转请求总数（只统计 /{code} 路径，不含 /shorten）
+      # 跳转请求总数（基于自定义计数器 shortener_redirect_requests_total）
+      # 该计数器只在通过长度校验（SHORT_CODE_LENGTH）后埋点，
+      # 扫描器打在 /{short_code} 上的乱路径 404 不计入，避免拉低 SLO
       - record: shortener:redirect_total
         expr: |
           sum(
-            increase(http_requests_total{method="GET", handler="/{short_code}"}[1h])
+            increase(shortener_redirect_requests_total[1h])
           )
 
-      # 成功的请求总数
+      # 成功的请求总数（2xx/3xx，跳转真实状态码为 3xx）
       - record: shortener:redirect_success_total
         expr: |
           sum(
-            increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[1h])
+            increase(shortener_redirect_requests_total{status_code=~"2xx|3xx"}[1h])
           )
 
       # 当前 SLI（实际成功率）

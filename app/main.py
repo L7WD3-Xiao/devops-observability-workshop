@@ -184,7 +184,7 @@ def shorten(original_url: str, db: Session = Depends(get_db)):
 
 @app.get("/{short_code}")
 def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
-    # 拦截非目标请求（防扫描的）
+    # 拦截非目标请求（扫描/恶意请求）
     if len(short_code) != SHORT_CODE_LENGTH:
         raise HTTPException(status_code=404)
 
@@ -248,23 +248,27 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
             crud.increment_click_count(db, short_code)
 
             # 6. 无论是否降级都记录耗时（降级请求标记 cache_hit="degraded"，保证自定义指标全流量可见）
+            #    状态码记录真实响应码（RedirectResponse 默认为 307）
             if redis_degraded:
-                redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit="degraded").inc()
-                redirect_duration.labels(short_code=short_code, cache_hit="degraded").observe(time.time() - start_time)
                 response = RedirectResponse(url=original_url)
                 response.headers["X-Redis-Degraded"] = "true"
-                return response
-            
-            # 注入short_code cache_hit time
-            redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit=cache_hit).inc()
-            redirect_duration.labels(short_code=short_code, cache_hit=cache_hit).observe(time.time() - start_time)
+                cache_hit_label = "degraded"
+            else:
+                response = RedirectResponse(url=original_url)
+                cache_hit_label = str(cache_hit)
 
-            return RedirectResponse(url=original_url)
+            redirect_requests_total.labels(short_code=short_code, status_code=response.status_code, cache_hit=cache_hit_label).inc()
+            redirect_duration.labels(short_code=short_code, cache_hit=cache_hit_label).observe(time.time() - start_time)
+
+            return response
     except HTTPException as e:
-        redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
+        # 记录真实状态码（如 404 短链不存在），避免与 500 混淆
+        redirect_requests_total.labels(short_code=short_code, status_code=e.status_code, cache_hit="unknown").inc()
         raise
     except Exception as e:
         logger.error(f"Error processing redirect: {e}", extra={"short_code": short_code, "request_id": request_id})
+        # 真实 500 也要计入分母，否则 SLI 会漏掉服务故障
+        redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
         raise HTTPException(status_code=500, detail="Internal server error")
     
 

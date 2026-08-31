@@ -62,9 +62,10 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 ### 可用性
 
 > 先明确基础数据来源：  
-> 我们的 FastAPI 服务通过 `prometheus-fastapi-instrumentator` 自动暴露了以下指标（命名可能略有不同，但逻辑一致）：
+> **SLO 可用性**基于应用自定义计数器 `shortener_redirect_requests_total`（labels: short_code, status_code, cache_hit）计算。它只在通过短码长度校验后埋点，天然排除扫描流量（见下方拆解）；延迟仍使用 `prometheus-fastapi-instrumentator` 自动指标：
 >
-> - `http_requests_total`：请求总数（labels: method, path, status_code）
+> - `shortener_redirect_requests_total`：跳转请求计数器（SLO 分母/分子来源）
+> - `http_requests_total`：自动请求总数（仅作参考）
 > - `http_request_duration_seconds_bucket`：请求延迟直方图桶（labels: method, path, le）
 
 （该部分仅介绍部分时间尺度的SLO，其余时间尺度写法相似，不重复介绍）
@@ -77,18 +78,18 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 - record: shortener:redirect_total
   expr: |
     sum(
-      increase(http_requests_total{method="GET", handler="/{short_code}"}[1h])
+      increase(shortener_redirect_requests_total[1h])
     )
 ```
 
-**含义**：短链跳转接口（`GET /{code}`）的总请求次数，按 `code` 和 `cache_hit` 标签分组。
+**含义**：短链跳转接口（`GET /{code}`）的合法请求总数（通过长度校验后埋点），按 `short_code` / `status_code` / `cache_hit` 聚合后求和。
 
 **拆解**：
 
-- `fastapi_requests_total{method="GET", handler="/{short_code}"}`：筛选出所有 HTTP GET 请求，且路径是 `/` 后跟一串字母数字（即短链 code）。正则 `/[a-zA-Z0-9]+` 排除了 `/shorten` 等路径。
-- `increase(...[1h])`：计算每个指标在过去 1 小时内的增量（即新增请求数）。
+- `shortener_redirect_requests_total`：应用内自定义计数器，只有 `len(short_code) == SHORT_CODE_LENGTH` 校验通过后才会 `inc()`。所以扫描器打向 `/wp-admin`、`/abc` 等乱路径产生的 404 不会计入，避免拉低 SLO。
+- `increase(...[1h])`：计算指标在过去 1 小时内的增量（即新增请求数）。
 
-> 这条 rule 是为了后续计算错误率时，只统计跳转接口，避免混入 `/shorten` 等写操作。
+> 这条 rule 是为了后续计算错误率时，只统计跳转接口的合法请求，避免混入 `/shorten` 写操作和扫描流量。
 
 ---
 
@@ -98,16 +99,16 @@ SLO：服务等级目标，**对 SLI 设定的目标值或范围**，代表服�
 - record: shortener:redirect_success_total
   expr: |
     sum(
-      increase(http_requests_total{method="GET", handler="/{short_code}", status=~"2xx|3xx"}[1h])
+      increase(shortener_redirect_requests_total{status_code=~"2xx|3xx"}[1h])
     )
 ```
 
-**含义**：成功的目标请求总数，满足 **状态码成功（2xx或3xx）**。
+**含义**：成功的跳转请求总数，满足 **状态码成功（2xx或3xx）**。
 
 **拆解**：
 
-- `increase(http_requests_total{..., status=~"2xx|3xx"}[1h])`  
-  状态码为 2xx 或 3xx 的请求增量（3xx 是因为跳转是 302/301）。
+- `shortener_redirect_requests_total{status_code=~"2xx|3xx"}`：状态码为 2xx 或 3xx 的跳转请求（跳转真实返回 3xx，即 RedirectResponse 默认 307）。
+- 404（短链不存在）和 500 会进入分母但不进分子，仍会如实反映可用性。
 
 #### 3.`sli_current`
 
@@ -404,10 +405,13 @@ def redirect(short_code: str, request: Request, ...):
     try:
         # ... 原有逻辑 ...
         cache_hit = "hit" if cached_url else "miss"
-        redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit=cache_hit).inc()
+        redirect_requests_total.labels(short_code=short_code, status_code=response.status_code, cache_hit=cache_hit).inc()
         redirect_duration.labels(short_code=short_code, cache_hit=cache_hit).observe(time.time() - start_time)
         return RedirectResponse(url=original_url)
     except HTTPException as e:
+        redirect_requests_total.labels(short_code=short_code, status_code=e.status_code, cache_hit="unknown").inc()
+        raise
+    except Exception:
         redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
         raise
 ```
@@ -415,8 +419,9 @@ def redirect(short_code: str, request: Request, ...):
 这样 Prometheus 就会得到类似这样的指标：
 
 ```text
-shortener_redirect_requests_total{short_code="abc123", status="success", cache_hit="hit"} 
-shortener_redirect_requests_total{short_code="abc123", status="success", cache_hit="miss"} 
+shortener_redirect_requests_total{short_code="abc123", status_code="307", cache_hit="hit"} 
+shortener_redirect_requests_total{short_code="abc123", status_code="307", cache_hit="miss"} 
+shortener_redirect_requests_total{short_code="abc123", status_code="404", cache_hit="unknown"} 
 ```
 
 使用下方查询语句
