@@ -182,6 +182,11 @@ def shorten(original_url: str, db: Session = Depends(get_db)):
     logger.info(f"Short URL created", extra={"short_code": short_code, "original_url": original_url})
     return {"short_code": short_code}
 
+# 注意：/health 必须注册在 /{short_code}（catch-all）之前，否则 "health" 会被当作 6 位短码查询返回 404
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.get("/{short_code}")
 def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
     # 拦截非目标请求（扫描/恶意请求）
@@ -270,8 +275,3 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
         # 真实 500 也要计入分母，否则 SLI 会漏掉服务故障
         redirect_requests_total.labels(short_code=short_code, status_code=500, cache_hit="unknown").inc()
         raise HTTPException(status_code=500, detail="Internal server error")
-    
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}

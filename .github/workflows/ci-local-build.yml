@@ -126,33 +126,34 @@ jobs:
     needs: deploy-dev
     runs-on: ubuntu-latest
     steps:
-      - name: Install k6
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gnupg
-          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update
-          sudo apt-get install -y k6
-      - name: Run load test
+      # k6 在 dev 主机本地以容器方式运行：避免 GitHub Runner 跨境 RTT（~400ms）污染延迟数据，
+      # 测到的是真实服务端处理延迟。redirects=0：只测短链跳转本身，不跟随重定向抓取目标站
+      - name: 服务器本地 k6 压测
+        uses: appleboy/ssh-action@v1.0.3
         env:
           VUS: ${{github.event.inputs.vus || '30'}}
           DURATION: ${{github.event.inputs.duration || '30s'}}
-        run: |
-          set -euo pipefail
-          SHORT_CODE=$(curl -fsS -X POST "http://${{secrets.DEV_HOST}}:8000/shorten?original_url=https://www.baidu.com" | jq -re '.short_code')
-          test -n "$SHORT_CODE" || { echo "::error::/shorten 未返回 short_code"; exit 1; }
-          echo '
-          import http from "k6/http";
-          import { check } from "k6";
-          export let options = {
-            vus: Number(__ENV.VUS || 30),
-            duration: __ENV.DURATION || "30s",
-          };
-          export default function () {
-            let res = http.get(__ENV.URL);
-            check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
-          }' | k6 run -e URL="http://${{secrets.DEV_HOST}}:8000/$SHORT_CODE" -e VUS="$VUS" -e DURATION="$DURATION" -
+        with:
+          host: ${{secrets.DEV_HOST}}
+          username: ${{secrets.SSH_USER}}
+          key: ${{secrets.SSH_PRIVATE_KEY}}
+          envs: VUS,DURATION
+          script: |
+            set -euo pipefail
+            SHORT_CODE=$(curl -fsS -X POST "http://localhost:8000/shorten?original_url=https://www.baidu.com" | jq -re '.short_code')
+            test -n "$SHORT_CODE" || { echo "::error::/shorten 未返回 short_code"; exit 1; }
+            docker run --rm -i --network host \
+              -e URL="http://localhost:8000/$SHORT_CODE" \
+              -e VUS="$VUS" -e DURATION="$DURATION" \
+              grafana/k6 run - <<'K6EOF'
+            import http from "k6/http";
+            import { check } from "k6";
+            export let options = { vus: Number(__ENV.VUS || 30), duration: __ENV.DURATION || "30s" };
+            export default function () {
+              let res = http.get(__ENV.URL, { redirects: 0 });
+              check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
+            }
+            K6EOF
       - name: SLO 门禁（错误预算燃烧率 > 10 则失败）
         uses: appleboy/ssh-action@v1.0.3
         with:
