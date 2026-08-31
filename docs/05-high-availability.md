@@ -29,7 +29,8 @@ Docker Compose 或 K8s 中配置：
 
 ```yaml
 healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  # slim 镜像无 curl，用 python urllib 探测（避免为检查工具增大镜像）
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
   interval: 10s
   retries: 3
 ```

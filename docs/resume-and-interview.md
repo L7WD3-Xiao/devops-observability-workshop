@@ -311,7 +311,7 @@ app 同时接入两个网络（因为 Prometheus 需要 scrape app 的 `/metrics
 两层健康检查：
 
 1. **应用层**：`/health` 端点返回 `{"status": "ok"}`，只要 FastAPI 进程能响应就返回 200。**注意**：`/health` 必须注册在 `/{short_code}`（catch-all）路由**之前**，否则 6 字符的 "health" 会被当成短链查询返回 404（Starlette 按注册顺序匹配路由，我踩过这个坑）
-2. **Docker Compose 层**：为 app 容器配置了 `healthcheck`（curl /health，30s 间隔，3 次重试），MySQL 用 `mysqladmin ping`，Redis 用 `redis-cli ping`。app 的 `depends_on` 使用了 `condition: service_healthy`，确保数据库和 Redis 就绪后才启动 app
+2. **Docker Compose 层**：为 app 容器配置了 `healthcheck`（python urllib 请求 /health，30s 间隔，3 次重试），MySQL 用 `mysqladmin ping`，Redis 用 `redis-cli ping`。app 的 `depends_on` 使用了 `condition: service_healthy`，确保数据库和 Redis 就绪后才启动 app。**注意**：镜像基于 `python:3.11-slim`，未安装 curl，健康检查用 python urllib 而不是 curl，避免为了一个检查工具把镜像撑大；健康检查命令必须能在容器内直接执行
 
 **追问：`/health` 和 `/ready` 应该有什么区别？**
 
