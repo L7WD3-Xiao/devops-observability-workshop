@@ -104,7 +104,11 @@ except Exception as e:
 app = FastAPI(title="Shortener Service", version="1.0.0")
 
 # Prometheus 指标
-Instrumentator().instrument(app).expose(app)
+# v7 默认低分辨率桶 (0.1, 0.5, 1) 会使 P99 失真（全部压到 100ms 桶顶），显式使用细桶
+Instrumentator().instrument(
+    app,
+    latency_lowr_buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1),
+).expose(app)
 
 # ========== 依赖注入 ==========
 def get_db():
@@ -243,8 +247,10 @@ def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
             # 5. 增加点击量
             crud.increment_click_count(db, short_code)
 
-            # 6. 如果处于降级模式，在响应头中标记（用于监控）
+            # 6. 无论是否降级都记录耗时（降级请求标记 cache_hit="degraded"，保证自定义指标全流量可见）
             if redis_degraded:
+                redirect_requests_total.labels(short_code=short_code, status_code=200, cache_hit="degraded").inc()
+                redirect_duration.labels(short_code=short_code, cache_hit="degraded").observe(time.time() - start_time)
                 response = RedirectResponse(url=original_url)
                 response.headers["X-Redis-Degraded"] = "true"
                 return response
