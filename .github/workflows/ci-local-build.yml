@@ -139,7 +139,7 @@ jobs:
           DURATION: ${{github.event.inputs.duration || '30s'}}
           TARGET: ${{github.event.inputs.target_url || 'http://47.114.124.150:8000'}}
         run: |
-          SHORT_CODE=$(curl -s -X POST "${{ secrets.DEV_HOST }}/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          SHORT_CODE=$(curl -s -X POST "${{secrets.DEV_HOST}}/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
           echo '
           import http from "k6/http";
           import { check } from "k6";
@@ -150,7 +150,7 @@ jobs:
           export default function () {
             let res = http.get(__ENV.URL);
             check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
-          }' | k6 run -e URL="${{ secrets.DEV_HOST }}/$SHORT_CODE" -e VUS="$VUS" -e DURATION="$DURATION" -
+          }' | k6 run -e URL="${{secrets.DEV_HOST}}/$SHORT_CODE" -e VUS="$VUS" -e DURATION="$DURATION" -
       - name: SLO 门禁（错误预算燃烧率 > 10 则失败）
         uses: appleboy/ssh-action@v1.0.3
         with:
