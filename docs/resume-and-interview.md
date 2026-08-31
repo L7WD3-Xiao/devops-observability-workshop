@@ -53,7 +53,7 @@
 
 - 实现 Metrics → Logs → Traces **三信号关联排查**：从 Grafana 发现 P99 异常 → 点击跳转到 Loki 日志 → 通过 trace_id 查看 Jaeger 火焰图，定位到缓存穿透，全链路耗时 < 2 分钟
 - CI/CD 流水线在 k6 压测后自动校验 SLO，错误预算燃烧率超标时阻断发布，**将发布质量决策从人工判断变为自动化门禁**
-- Redis 容灾演练验证了降级逻辑：熔断器在 3 次失败后打开，演练瞬间 P99（含 3 个 1s 连接超时请求）约 500ms，稳态降级 P99 约 30–60ms，核心跳转始终可用；恢复后 30 秒内自动闭合
+- Redis 容灾演练验证了降级逻辑：熔断器在 3 次失败后打开，服务端稳态降级 P99 约 30–60ms，核心跳转始终可用；恢复后 30 秒内自动闭合。CI 中 k6 的客户端 P99 ~500ms 主要来自 GitHub Runner 跨境 RTT（~400ms），不代表服务端延迟
 - 整体方案覆盖 Google SRE Book 核心实践（SLO、错误预算、金丝雀/降级），具备校招面试中的差异化竞争力
 
 ---
@@ -199,10 +199,10 @@ CLOSED（正常）──[连续 3 次失败]──→ OPEN（熔断）──[30 
 
 演练步骤和观察：
 
-1. **正常状态**：`make test` 创建短链并跳转，Redis 缓存命中率 100%。模拟生产环境压测（30 VUs）下，**1G 数据库 / 100M Redis 持久卷**的 P99 约 5–15ms，**10G 数据库 / 300M Redis 持久卷**约 10–25ms。延迟主要来自每个请求必做的 MySQL 点击量 UPDATE+COMMIT（每次 commit 一次 fsync），Redis GET 本身 < 1ms
+1. **正常状态**：`make test` 创建短链并跳转，Redis 缓存命中率 100%。轻载下单请求的服务端 P99（Prometheus）：**1G 数据库 / 100M Redis 持久卷**约 5–15ms，**10G 数据库 / 300M Redis 持久卷**约 10–25ms。延迟主要来自每个请求必做的 MySQL 点击量 UPDATE+COMMIT（每次 commit 一次 fsync），Redis GET 本身 < 1ms
 2. **`docker compose stop redis`**：手动停掉 Redis 容器
 3. **前 3 个请求**：每个请求尝试连接 Redis，因 `socket_connect_timeout=1` 在 1 秒后超时，记录 `redis_degradation_total{reason="connection_or_timeout"}`，熔断器 `consecutive_failures` 累加
-4. **第 4 个请求起**：熔断器打开（`is_open = True`），`should_allow()` 返回 False，请求直接跳过 Redis 查 DB，不再尝试连接 Redis。稳态降级延迟：1G 场景 P99 约 15–40ms，10G 场景约 30–60ms（缓冲池冷时可达 100ms+），请求仍成功。响应头出现 `X-Redis-Degraded: true`
+4. **第 4 个请求起**：熔断器打开（`is_open = True`），`should_allow()` 返回 False，请求直接跳过 Redis 查 DB，不再尝试连接 Redis。稳态降级延迟（服务端）：1G 场景 P99 约 15–40ms，10G 场景约 30–60ms（缓冲池冷时可达 100ms+），请求仍成功。响应头出现 `X-Redis-Degraded: true`
 5. **Prometheus 观察**：`shortener_redis_degradation_total` 递增，`shortener_redis_circuit_breaker_state` 变为 1
 6. **`docker compose start redis`**：重启 Redis
 7. **30 秒后**：熔断器进入半开状态，允许一个请求尝试连接 Redis。连接成功 → `record_success()` → 熔断器关闭，缓存恢复正常
@@ -212,6 +212,7 @@ CLOSED（正常）──[连续 3 次失败]──→ OPEN（熔断）──[30 
 **数字口径说明**：
 
 - **演练瞬间 P99 ≠ 稳态降级 P99**：演练窗口前 3 个请求各阻塞约 1s（`socket_connect_timeout=1` 连接超时），若 P99 统计窗口包含这 3 个请求，会看到约 500ms–1s 的尖刺；熔断打开后纯走 DB 的**稳态** P99 才是 step 4 的数字。面试时建议分开表述
+- **k6 客户端视角 ≠ 服务端视角**：CI 的 k6 跑在 GitHub Runner（境外），跨境 RTT ~400ms，客户端 P99 ~500ms 是端到端体验；Prometheus 服务端 P99 正常 ~50ms。把 k6 挪到服务器本地跑（真 30 并发）后，服务端 P50≈1.3s、P95≈1.9s——瓶颈在 app 自身（0.5 CPU + 每请求 fsync + 连接池 5），跨境 RTT 反而掩盖了真实容量
 - **为什么 10G / 1G 数据库对 P99 影响不大**：`short_code` 是唯一索引点查，B+ 树深度都是 2–3 层，差别只在于缓冲池（MySQL 8 默认仅 128MB）是否命中冷页——10G 场景随机短码更可能读盘（SSD 5–20ms/次），所以 miss 路径 P99 从 ~20ms 抬到 ~50ms
 - **真正的 P99 地板在代码里**：每个请求（含缓存命中）都会执行 `increment_click_count`（SELECT+UPDATE+COMMIT，`innodb_flush_log_at_trx_commit=1` 下每次 commit 一次 fsync），加上 SQLAlchemy 默认连接池只有 5 个、app 容器限 0.5 CPU。想降低 P99，应优先改造这三处（异步/批量计数、加大连接池、放宽缓冲池），而不是纠结 Redis 卷大小
 
@@ -264,21 +265,23 @@ retry_on_timeout=False     # 不自动重试
 
 ```javascript
 export let options = {
-  vus: 30,        // 30 个虚拟用户并发
-  duration: "30s", // 持续 30 秒
+  vus: 30,          // 30 个虚拟用户并发
+  duration: "30s",  // 持续 30 秒
 };
 export default function () {
-  let res = http.get(__ENV.URL);
+  // redirects=0：不跟随 302/307 重定向，只测短链服务本身
+  let res = http.get(__ENV.URL, { redirects: 0 });
   check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
 }
 ```
 
 参数设计：
-- **30 VUs**：对于单实例 FastAPI + 单 MySQL + 单 Redis 的架构，30 并发已经能产生足够压力暴露问题
+- **30 VUs**：对单实例 FastAPI（限 0.5 CPU）+ 单 MySQL + 单 Redis 的架构，30 并发已能压出真实容量上限（服务器本地实测 P50≈1.3s）
 - **30 秒**：足够让 Prometheus 采集到 2-3 个数据点（15s scrape interval），供后续 SLO 计算使用
-- **检查 3xx**：短链跳转返回 302，所以成功的标准是 3xx 而非 200
+- **检查 3xx**：短链跳转返回 302/307（FastAPI `RedirectResponse` 默认 307），所以成功的标准是 3xx 而非 200；必须 `redirects: 0`，否则 k6 会跟随跳转抓取目标站，延迟数据被污染、检查也永远失败
+- **运行位置**：k6 以容器方式跑在 dev 主机本地（`grafana/k6` + `--network host`），避免 GitHub Runner 跨境 RTT（~400ms）污染延迟数据；SLO 门禁仍以 Prometheus 服务端指标为准
 
-压测流程：先通过 API 创建一个短链获取 `short_code`，然后用 k6 对这个短链的跳转接口施压。
+压测流程：先在 dev 主机本地创建短链获取 `short_code`，再用 k6 对 `http://localhost:8000/{code}` 施压。
 
 ---
 
@@ -307,7 +310,7 @@ app 同时接入两个网络（因为 Prometheus 需要 scrape app 的 `/metrics
 
 两层健康检查：
 
-1. **应用层**：`/health` 端点返回 `{"status": "ok"}`，只要 FastAPI 进程能响应就返回 200
+1. **应用层**：`/health` 端点返回 `{"status": "ok"}`，只要 FastAPI 进程能响应就返回 200。**注意**：`/health` 必须注册在 `/{short_code}`（catch-all）路由**之前**，否则 6 字符的 "health" 会被当成短链查询返回 404（Starlette 按注册顺序匹配路由，我踩过这个坑）
 2. **Docker Compose 层**：为 app 容器配置了 `healthcheck`（curl /health，30s 间隔，3 次重试），MySQL 用 `mysqladmin ping`，Redis 用 `redis-cli ping`。app 的 `depends_on` 使用了 `condition: service_healthy`，确保数据库和 Redis 就绪后才启动 app
 
 **追问：`/health` 和 `/ready` 应该有什么区别？**
