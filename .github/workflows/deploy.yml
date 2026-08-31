@@ -1,27 +1,51 @@
 name: Deploy
 
-# 开启手动触发
+# ===== 功能 =====
+# 部署到生产环境，作为项目完备性，仅演示，教学项目可以理解仅为在预生产环境部署并压测
+# ===== 触发条件 =====
+# 1. 仅手动触发（workflow_dispatch）：从 Actions 页面选择 main 分支运行
+# 2. 非 main 分支触发时 job 直接跳过（不执行、不消耗生产环境审批）
+# 3. 同一时间只允许一个生产部署，避免并发覆盖
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '试运行：只打印部署命令，不实际连接服务器'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy-prod:
     runs-on: ubuntu-latest
-    # 只有在 main 分支上的 push 才执行（避免从 develop 分支部署生产）
-    if: github.ref == 'refs/heads/main'
+    # 只有在 main 分支上的手动触发才执行（避免从 develop 分支部署生产）
+    if: ${{github.ref}} == 'refs/heads/main'
     # 使用 GitHub 的 Environment 功能，可以配置部署审批（需要手动确认）
     environment:
       name: production
       url: https://your-prod-domain.com   # 你的生产域名
     steps:
+      - name: Dry run（试运行，仅打印命令）
+        if: inputs.dry_run == 'true'
+        run: |
+          echo "host: ${{secrets.PROD_HOST}}"
+          echo "cd /opt/shortener"
+          echo "docker compose pull app"
+          echo "docker compose up -d --no-deps app"
+          echo "docker image prune -f"
+        
       - name: Deploy to production
+        if: inputs.dry_run != 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{secrets.PROD_HOST}}
+          username: ${{secrets.SSH_USER}}
+          key: ${{secrets.SSH_PRIVATE_KEY}}
           script: |
-            # cd /opt/shortener
-            # docker compose pull app
-            # docker compose up -d --no-deps app
-            # docker image prune -f
+            cd /opt/shortener
+            docker compose pull app
+            docker compose up -d --no-deps app
+            docker image prune -f

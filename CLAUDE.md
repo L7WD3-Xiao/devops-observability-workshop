@@ -103,9 +103,8 @@ Two networks: `app-network` (app + MySQL + Redis) and `observability` (monitorin
 
 ### CI/CD (GitHub Actions)
 
-Three workflows:
-- **ci-local-build.yml** — Main pipeline on `develop` push: test → deploy to dev via SSH → k6 load test → SLO gate
-- **test.yml** — Standalone SLO check (manual trigger)
+Two workflows:
+- **ci-local-build.yml** — Main pipeline on `develop` push: test → deploy to dev via SSH → k6 load test → SLO gate（原独立 test.yml 的 SLO 门禁配置已并入此流水线）
 - **deploy.yml** — Production deploy (manual trigger, `main` branch only, gated by `production` environment)
 
 The SLO gate queries Prometheus for `shortener:error_budget_burn_rate` and blocks deployment if burn rate > 10. Load testing uses k6 (30 VUs, 5-30s duration).

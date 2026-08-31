@@ -1,13 +1,58 @@
 name: Shortener CI/CD (Local Build)
 
+# ===== 流程 =====
+# 1. 代码检查 + 单元测试（可选）
+# 2. 部署到开发环境（直接在目标主机上构建镜像）
+# 3. 性能测试 + SLO 门禁（原 test.yml 的 SLO 门禁配置已并入本流水线）
+# ===== 触发条件 =====
+# 1. push 到 develop：仅当涉及应用/部署相关文件时才触发（改 docs、README 等不触发）
+# 2. pull_request 指向 develop 或 master：只跑 test 做验证，不触发部署
+# 3. 手动触发（workflow_dispatch）：
+#    - skip_deploy：跳过部署到 dev，只运行测试
+#    - vus / duration / target_url：调整 k6 压测参数（原 test.yml 的配置已并入本流水线）
 on:
   push:
     branches: [ develop ]
-  # pull_request:
-  #   branches: [ master ]
+    paths:
+      - 'app/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - 'scripts/**'
+      - '.github/workflows/ci-local-build.yml'
+  pull_request:
+    branches: [ develop, master ]
+    types: [ opened, synchronize, reopened ]
+    paths:
+      - 'app/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - 'scripts/**'
+      - '.github/workflows/ci-local-build.yml'
+  workflow_dispatch:
+    inputs:
+      skip_deploy:
+        description: '跳过部署到 dev 环境，只运行测试'
+        type: boolean
+        default: false
+      vus:
+        description: 'k6 并发用户数（默认 30）'
+        type: number
+        default: 30
+      duration:
+        description: '压测时长，如 30s、1m（默认 30s）'
+        type: string
+        default: '30s'
 
-# 全局环境变量，后续步骤可以直接使用 ${{ env.XXX }}
-# 实际并不使用，而是使用的是配置在secrets中的变量
+# 同一分支/PR 的连续提交会取消上一次仍在运行的流水线，避免排队浪费
+concurrency:
+  group: ci-local-build-${{github.ref}}
+  cancel-in-progress: true
+
+# 全局环境变量示例，实际并不使用，而是使用的是配置在secrets中的变量
 # env:
 #   DEV_HOST: your-dev-server.com
 #   SSH_USER: your-ssh-username
@@ -31,8 +76,12 @@ jobs:
           echo "No unit tests yet"
 
   # 2. 部署到开发环境（直接在目标主机上构建镜像）
+  #    仅 push 到 develop、或手动触发且未勾选 skip_deploy 时执行；PR 不部署
   deploy-dev:
     needs: test
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.skip_deploy != 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code again (for transfer to host)
@@ -41,34 +90,37 @@ jobs:
       - name: Deploy to dev server via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEV_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{secrets.DEV_HOST}}
+          username: ${{secrets.SSH_USER}}
+          key: ${{secrets.SSH_PRIVATE_KEY}}
           # 将整个项目代码同步到目标主机的 /opt/shortener 目录
           script: |
             # 1. 如果目标目录不存在则克隆，否则更新代码（可以用 rsync 或 git pull）
             if [ ! -d "/opt/shortener" ]; then
-              git clone ${{ github.server_url }}/${{ github.repository }} /opt/shortener
+              git clone ${{github.server_url}}/${{github.repository}} /opt/shortener
             else
               cd /opt/shortener
               git fetch origin
-              git reset --hard ${{ github.sha }}
+              git reset --hard ${{github.sha}}
             fi
-            
+
             # 2. 进入项目目录，构建镜像
             cd /opt/shortener
             make build
-            
+
             # 3. 用 docker-compose 重启服务，仅重启 app 不重启依赖
             docker compose up -d --no-deps app
 
       - name: Smoke test
         run: |
           sleep 10
-          SHORT_CODE=$(curl -s -X POST "http://${{ secrets.DEV_HOST }}:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
-          curl -f -L "http://${{ secrets.DEV_HOST }}:8000/$SHORT_CODE" || exit 1
+          SHORT_CODE=$(curl -s -X POST "http://${{secrets.DEV_HOST}}:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          curl -f -L "http://${{secrets.DEV_HOST}}:8000/$SHORT_CODE" || exit 1
 
-  # 3. 性能测试 + SLO 校验（与之前相同，依赖测试主机上的 Prometheus）
+  # 3. 性能测试 + SLO 门禁（原 test.yml 的 SLO 门禁配置已并入本流水线）
+  #    k6 压测后，在 dev 主机上通过 make check 查询本地 Prometheus：
+  #    错误预算燃烧率 > 10 则流水线失败，阻止进入生产部署。
+  #    SLO 门禁随部署流程执行，不再单独用 schedule 定时轮询。
   performance-slo-check:
     needs: deploy-dev
     runs-on: ubuntu-latest
@@ -82,27 +134,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y k6
       - name: Run load test
+        env:
+          VUS: ${{github.event.inputs.vus || '30'}}
+          DURATION: ${{github.event.inputs.duration || '30s'}}
+          TARGET: ${{github.event.inputs.target_url || 'http://47.114.124.150:8000'}}
         run: |
-          SHORT_CODE=$(curl -s -X POST "http://47.114.124.150:8000/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
+          SHORT_CODE=$(curl -s -X POST "${{ secrets.DEV_HOST }}/shorten?original_url=https://www.baidu.com" | jq -r '.short_code')
           echo '
           import http from "k6/http";
           import { check } from "k6";
           export let options = {
-            vus: 30,
-            duration: "30s",
+            vus: Number(__ENV.VUS || 30),
+            duration: __ENV.DURATION || "30s",
           };
           export default function () {
             let res = http.get(__ENV.URL);
             check(res, { "status is 3xx": (r) => r.status >= 300 && r.status < 400 });
-          }' | k6 run -e URL="http://47.114.124.150:8000/$SHORT_CODE" -
-      - name: Check SLO error budget
+          }' | k6 run -e URL="${{ secrets.DEV_HOST }}/$SHORT_CODE" -e VUS="$VUS" -e DURATION="$DURATION" -
+      - name: SLO 门禁（错误预算燃烧率 > 10 则失败）
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEV_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # 将整个项目代码同步到目标主机的 /opt/shortener 目录
+          host: ${{secrets.DEV_HOST}}
+          username: ${{secrets.SSH_USER}}
+          key: ${{secrets.SSH_PRIVATE_KEY}}
+          # 在 dev 主机本地查询 Prometheus（不暴露公网），逻辑见 scripts/check_slo.sh
           script: |
             cd /opt/shortener/
             make check
-            
