@@ -21,7 +21,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 1,
+  "id": 4,
   "links": [],
   "liveNow": false,
   "panels": [
@@ -522,13 +522,16 @@
               "viz": false
             },
             "lineInterpolation": "linear",
+            "lineStyle": {
+              "fill": "solid"
+            },
             "lineWidth": 1,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
             },
             "showPoints": "auto",
-            "spanNulls": false,
+            "spanNulls": true,
             "stacking": {
               "group": "A",
               "mode": "none"
@@ -610,6 +613,9 @@
               "viz": false
             },
             "lineInterpolation": "linear",
+            "lineStyle": {
+              "fill": "solid"
+            },
             "lineWidth": 1,
             "pointSize": 5,
             "scaleDistribution": {
@@ -893,13 +899,13 @@
     {
       "cards": {},
       "color": {
-        "cardColor": "#b4ff00",
+        "cardColor": "#FF9830",
         "colorScale": "sqrt",
         "colorScheme": "interpolateOranges",
         "exponent": 0.5,
-        "mode": "spectrum"
+        "mode": "opacity"
       },
-      "dataFormat": "timeseries",
+      "dataFormat": "tsbuckets",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -913,6 +919,7 @@
       "legend": {
         "show": false
       },
+      "pluginVersion": "8.3.3",
       "reverseYBuckets": false,
       "targets": [
         {
@@ -921,9 +928,10 @@
             "uid": "PBFA97CFB590B2093"
           },
           "exemplar": true,
-          "expr": "sum(rate(http_request_duration_seconds_bucket{method=\"GET\", handler=\"/{short_code}\"}[1m])) by (le) * 1000",
+          "expr": "sum(rate(http_request_duration_seconds_bucket{method=\"GET\", handler=\"/{short_code}\"}[5m])) by (le)",
+          "format": "heatmap",
           "interval": "",
-          "legendFormat": "",
+          "legendFormat": "{{le}}",
           "refId": "A"
         }
       ],
@@ -937,14 +945,15 @@
         "show": true
       },
       "yAxis": {
-        "format": "short",
+        "decimals": 1,
+        "format": "s",
         "logBase": 1,
         "show": true
       },
       "yBucketBound": "auto"
     }
   ],
-  "refresh": "30s",
+  "refresh": false,
   "schemaVersion": 34,
   "style": "dark",
   "tags": [],
@@ -952,7 +961,7 @@
     "list": []
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-3h",
     "to": "now"
   },
   "timepicker": {
@@ -973,6 +982,6 @@
   "timezone": "",
   "title": "Shortener - SLO Dashboard",
   "uid": "6NsbFu0vk",
-  "version": 60,
+  "version": 11,
   "weekStart": ""
 }
